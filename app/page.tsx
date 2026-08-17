@@ -7,6 +7,18 @@ import {
   useMemo,
   useState,
 } from "react";
+import { FirebaseError } from "firebase/app";
+import {
+  browserLocalPersistence,
+  browserSessionPersistence,
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+  type User,
+} from "firebase/auth";
+import { getFirebaseAuth } from "@/lib/firebase";
 
 type View =
   | "overview"
@@ -71,20 +83,85 @@ function MiniStatus({ label, value, tone = "cyan" }: { label: string; value: str
   return <div className="mini-status"><span>{label}</span><strong><StatusDot tone={tone} />{value}</strong></div>;
 }
 
-function LoginScreen({ onEnter }: { onEnter: () => void }) {
+type AuthAction = "signin" | "reset";
+
+function getAuthErrorMessage(error: unknown): string {
+  if (!(error instanceof FirebaseError)) {
+    return "Authentication is temporarily unavailable. Please try again.";
+  }
+
+  switch (error.code) {
+    case "auth/invalid-credential":
+    case "auth/invalid-email":
+      return "The email address or password is incorrect.";
+    case "auth/user-disabled":
+      return "This account has been disabled. Contact the system owner.";
+    case "auth/too-many-requests":
+      return "Too many attempts were made. Wait a moment and try again.";
+    case "auth/network-request-failed":
+      return "The authentication service could not be reached. Check your connection.";
+    case "auth/operation-not-allowed":
+      return "Email and password access has not been enabled in Firebase yet.";
+    default:
+      return "Unable to authenticate. Verify your credentials and try again.";
+  }
+}
+
+function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [message, setMessage] = useState("");
+  const [rememberDevice, setRememberDevice] = useState(false);
+  const [message, setMessage] = useState(initialMessage);
+  const [messageTone, setMessageTone] = useState<"error" | "success">("error");
+  const [busyAction, setBusyAction] = useState<AuthAction | null>(null);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!email.trim() || !password) {
-      setMessage("Enter both fields, or use dashboard preview below.");
+      setMessageTone("error");
+      setMessage("Enter both your email address and password.");
       return;
     }
+
+    setBusyAction("signin");
     setMessage("");
-    onEnter();
+    try {
+      const auth = getFirebaseAuth();
+      await setPersistence(auth, rememberDevice ? browserLocalPersistence : browserSessionPersistence);
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (error) {
+      setMessageTone("error");
+      setMessage(getAuthErrorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function resetPassword() {
+    if (!email.trim()) {
+      setMessageTone("error");
+      setMessage("Enter your email address first, then request a password reset.");
+      return;
+    }
+
+    setBusyAction("reset");
+    setMessage("");
+    try {
+      await sendPasswordResetEmail(getFirebaseAuth(), email.trim());
+      setMessageTone("success");
+      setMessage("If an authorized account exists, password reset instructions have been sent.");
+    } catch (error) {
+      if (error instanceof FirebaseError && (error.code === "auth/user-not-found" || error.code === "auth/user-disabled")) {
+        setMessageTone("success");
+        setMessage("If an authorized account exists, password reset instructions have been sent.");
+      } else {
+        setMessageTone("error");
+        setMessage(getAuthErrorMessage(error));
+      }
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   return (
@@ -94,7 +171,7 @@ function LoginScreen({ onEnter }: { onEnter: () => void }) {
       <div className="secure-grid" />
       <header className="login-header">
         <BrandMark />
-        <div className="prototype-pill"><StatusDot tone="amber" /> Prototype / Private</div>
+        <div className="prototype-pill prototype-pill--secure"><StatusDot tone="green" /> Private / Authenticated</div>
       </header>
 
       <div className="login-main">
@@ -113,35 +190,54 @@ function LoginScreen({ onEnter }: { onEnter: () => void }) {
           </div>
         </section>
 
-        <section className="access-panel" aria-label="Prototype sign in">
+        <section className="access-panel" aria-label="Secure sign in">
           <div className="access-panel__topline">
             <div><span className="section-kicker">Authorized access</span><h2>Residence portal</h2></div>
             <div className="access-glyph" aria-hidden="true"><i /></div>
           </div>
-          <div className="notice notice--amber"><StatusDot tone="amber" /><div><strong>Prototype access</strong><span>No live home systems are connected yet.</span></div></div>
+          <div className="notice notice--secure"><StatusDot tone="green" /><div><strong>Secure account access</strong><span>Home systems remain in simulation mode.</span></div></div>
 
           <form onSubmit={submit} className="access-form">
             <label htmlFor="email">Email address</label>
-            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="owner@dovercontrols.com" autoComplete="email" />
+            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="owner@dovercontrols.com" autoComplete="email" disabled={busyAction !== null} required aria-invalid={messageTone === "error" && message.length > 0} />
             <div className="password-label">
               <label htmlFor="password">Access passphrase</label>
-              <button className="text-button" type="button" onClick={() => setShowPassword((value) => !value)}>{showPassword ? "Hide" : "Show"}</button>
+              <button className="text-button" type="button" onClick={() => setShowPassword((value) => !value)} disabled={busyAction !== null}>{showPassword ? "Hide" : "Show"}</button>
             </div>
-            <input id="password" type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter passphrase" autoComplete="current-password" />
-            {message && <p className="form-message">{message}</p>}
-            <button type="submit" className="primary-button"><span>Authenticate</span><span aria-hidden="true">→</span></button>
+            <input id="password" type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter passphrase" autoComplete="current-password" disabled={busyAction !== null} required aria-invalid={messageTone === "error" && message.length > 0} />
+            <div className="access-form__options">
+              <label className="remember-control"><input type="checkbox" checked={rememberDevice} onChange={(event) => setRememberDevice(event.target.checked)} disabled={busyAction !== null} /><span>Remember this device</span></label>
+              <button className="text-button" type="button" onClick={resetPassword} disabled={busyAction !== null}>{busyAction === "reset" ? "Sending…" : "Forgot password?"}</button>
+            </div>
+            {message && <p className={`form-message form-message--${messageTone}`} role="status" aria-live="polite">{message}</p>}
+            <button type="submit" className="primary-button" disabled={busyAction !== null} aria-busy={busyAction === "signin"}><span>{busyAction === "signin" ? "Authenticating…" : "Authenticate"}</span><span aria-hidden="true">→</span></button>
           </form>
-          <div className="divider"><span>prototype</span></div>
-          <button type="button" className="preview-button" onClick={onEnter}>View dashboard preview</button>
-          <p className="privacy-note">Preview access requires no credentials and stores no password.</p>
+          <p className="privacy-note">No public account registration is offered in this portal.</p>
           <div className="terminal-strip">
             <MiniStatus label="Node" value="READY" tone="green" />
-            <MiniStatus label="Interface" value="ONLINE" tone="cyan" />
+            <MiniStatus label="Authentication" value="FIREBASE" tone="green" />
             <MiniStatus label="Home systems" value="PENDING" tone="amber" />
           </div>
         </section>
       </div>
-      <footer className="login-footer"><span>Private system · Authorized users only</span><span>Interface build 0.1 / Simulation</span></footer>
+      <footer className="login-footer"><span>Private system · Authorized users only</span><span>Firebase authentication / Simulation</span></footer>
+    </main>
+  );
+}
+
+function AuthLoadingScreen() {
+  return (
+    <main className="login-shell auth-loading-shell">
+      <div className="atmosphere atmosphere--one" />
+      <div className="atmosphere atmosphere--two" />
+      <div className="secure-grid" />
+      <header className="login-header"><BrandMark /><div className="prototype-pill"><StatusDot tone="cyan" /> Verifying session</div></header>
+      <section className="auth-loading" role="status" aria-live="polite">
+        <div className="auth-loading__ring" aria-hidden="true"><span /></div>
+        <span className="section-kicker">Secure session</span>
+        <h1>Verifying authorization</h1>
+        <p>Connecting to the Dover Controls identity service.</p>
+      </section>
     </main>
   );
 }
@@ -254,7 +350,7 @@ function ConnectionsView() {
   return <div className="dashboard-content"><DetailIntro code="CN" eyebrow="Connection center" title="Systems and integrations" description="This is the commissioning plan for the local Home Assistant core and every connected platform." badge="1 of 5 ready" /><div className="connection-card-grid">{systems.map((system) => <Panel className={`connection-detail ${system.ready ? "connection-detail--ready" : ""}`} key={system.code}><div className="connection-detail__head"><div className={`connection-icon ${system.ready ? "connection-icon--ready" : ""}`}>{system.code}</div><StateBadge tone={system.ready ? "ready" : "pending"}>{system.badge}</StateBadge></div><h3>{system.name}</h3><p>{system.detail}</p><div className="progress-line"><i style={{ width: system.ready ? "100%" : "0%" }} /></div><small>{system.foot}</small></Panel>)}</div><Panel className="commission-panel"><div><span className="section-kicker">Next milestone</span><h3>Commission the local control core</h3><p>Once Home Assistant OS is running, we can replace the mock provider with live entities while keeping this interface intact.</p></div><span className="commission-number">01</span></Panel></div>;
 }
 
-function Dashboard({ onExit }: { onExit: () => void }) {
+function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; userEmail: string | null }) {
   const [activeView, setActiveView] = useState<View>("overview");
   const [now, setNow] = useState(() => new Date(0));
   const [toast, setToast] = useState("");
@@ -313,7 +409,7 @@ function Dashboard({ onExit }: { onExit: () => void }) {
         <div className="sidebar-brand"><BrandMark compact /></div>
         <nav className="desktop-nav" aria-label="Dashboard sections"><span className="nav-heading">Command domains</span>{navItems.map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span>{item.label}{activeView === item.id && <i />}</button>)}</nav>
         <div className="sidebar-status"><span className="nav-heading">System status</span><div><StatusDot tone="green" /><p><strong>Portal ready</strong><small>Simulation mode</small></p></div><div><StatusDot tone="amber" /><p><strong>HA disconnected</strong><small>Awaiting local core</small></p></div></div>
-        <button className="profile-card" type="button" onClick={onExit}><span className="avatar">KK</span><span><strong>Kyle</strong><small>Exit preview</small></span><i>↗</i></button>
+        <button className="profile-card" type="button" onClick={() => void onExit()} aria-label={userEmail ? `Sign out ${userEmail}` : "Sign out"} title={userEmail ?? "Signed-in account"}><span className="avatar">KK</span><span><strong>Kyle</strong><small>Sign out</small></span><i>↗</i></button>
       </aside>
       <section className="dashboard-main">
         <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, Kyle.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><button className="alert-button" type="button" aria-label="No active alerts"><i /><span>0</span></button></div></header>
@@ -327,6 +423,38 @@ function Dashboard({ onExit }: { onExit: () => void }) {
 }
 
 export default function Home() {
-  const [screen, setScreen] = useState<"login" | "dashboard">("login");
-  return screen === "login" ? <LoginScreen onEnter={() => setScreen("dashboard")} /> : <Dashboard onExit={() => setScreen("login")} />;
+  const [authReady, setAuthReady] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authInitializationMessage, setAuthInitializationMessage] = useState("");
+
+  useEffect(() => {
+    let initializationTimer: number | undefined;
+    try {
+      return onAuthStateChanged(
+        getFirebaseAuth(),
+        (nextUser) => {
+          setUser(nextUser);
+          setAuthReady(true);
+        },
+        (error) => {
+          setAuthInitializationMessage(getAuthErrorMessage(error));
+          setAuthReady(true);
+        },
+      );
+    } catch (error) {
+      initializationTimer = window.setTimeout(() => {
+        setAuthInitializationMessage(getAuthErrorMessage(error));
+        setAuthReady(true);
+      }, 0);
+    }
+
+    return () => {
+      if (initializationTimer !== undefined) window.clearTimeout(initializationTimer);
+    };
+  }, []);
+
+  if (!authReady) return <AuthLoadingScreen />;
+  if (!user) return <LoginScreen initialMessage={authInitializationMessage} />;
+
+  return <Dashboard userEmail={user.email} onExit={() => signOut(getFirebaseAuth())} />;
 }
