@@ -300,7 +300,13 @@ export default function PanelsPreview() {
     return target === "all" ? ["house", "outbuilding"] : [target];
   }
 
+  function cancelArmingTimers() {
+    armingTimers.current.forEach(clearTimeout);
+    armingTimers.current = [];
+  }
+
   function arm(action: AlarmAction) {
+    cancelArmingTimers();
     const armingMode = `arming-${action}` as AlarmMode;
     const armedMode = `armed-${action}` as AlarmMode;
     const areas = selectedAreas();
@@ -318,6 +324,7 @@ export default function PanelsPreview() {
   }
 
   function disarm() {
+    cancelArmingTimers();
     const areas = selectedAreas();
     setState((current) => ({
       ...current,
@@ -330,6 +337,7 @@ export default function PanelsPreview() {
 
   function confirmPanic() {
     if (!panicModal) return;
+    cancelArmingTimers();
     const kind = panicModal;
     const areas = selectedAreas();
     setState((current) => ({
@@ -424,8 +432,8 @@ export default function PanelsPreview() {
           </div>
 
           <div className={styles.securityFooter}>
-            <span><StatusDot tone="green" /> 7 perimeter sensors ready</span>
-            <span><StatusDot tone="green" /> 3 siren outputs ready</span>
+            <span><StatusDot tone="amber" /> 7 perimeter sensors planned</span>
+            <span><StatusDot tone="amber" /> 3 siren outputs planned</span>
             <span className={styles.notMonitored}>Preview / Not monitored</span>
           </div>
         </section>
@@ -460,7 +468,7 @@ export default function PanelsPreview() {
       <footer className={styles.footer}>
         <div><StatusDot tone="green" /><span>Panel online</span><small>PoE / LAN</small></div>
         <div><StatusDot tone="amber" /><span>Home Assistant</span><small>Binding pending</small></div>
-        <div><StatusDot tone="green" /><span>Network</span><small>UniFi connected</small></div>
+        <div><StatusDot tone="amber" /><span>Network</span><small>Preview only</small></div>
         <div className={styles.footerMessage}><span>Simulation controls only</span><strong>Tomorrow: bind Alarmo + climate + lighting entities</strong></div>
       </footer>
 
