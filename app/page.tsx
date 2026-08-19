@@ -220,7 +220,10 @@ function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
           </div>
         </section>
       </div>
-      <footer className="login-footer"><span>Restricted interface · Authorized identities only</span><span>Identity verification / Restricted access</span></footer>
+      <footer className="login-footer">
+        <div className="login-footer__meta"><span>Restricted interface · Authorized identities only</span><span>Identity verification / Restricted access</span></div>
+        <p className="access-warning"><strong>Restricted system notice //</strong> Access activity is subject to logging, attribution, and retention. Unauthorized access, attempted intrusion, or misuse may be referred to appropriate authorities for investigation and prosecution to the fullest extent permitted by law.</p>
+      </footer>
     </main>
   );
 }
