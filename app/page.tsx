@@ -22,6 +22,7 @@ import { getFirebaseAuth } from "@/lib/firebase";
 
 type View =
   | "overview"
+  | "mission"
   | "security"
   | "climate"
   | "lighting"
@@ -50,6 +51,7 @@ const initialDemoState: DemoState = {
 
 const navItems: Array<{ id: View; code: string; label: string }> = [
   { id: "overview", code: "OV", label: "Overview" },
+  { id: "mission", code: "MC", label: "Mission Control" },
   { id: "security", code: "SC", label: "Security" },
   { id: "climate", code: "CL", label: "Climate" },
   { id: "lighting", code: "LT", label: "Lighting" },
@@ -175,21 +177,6 @@ function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
       </header>
 
       <div className="login-main">
-        <section className="login-intro" aria-labelledby="login-title">
-          <div className="eyebrow"><span>DC-GATEWAY-01</span><span className="eyebrow-rule" /><span>Controlled systems access</span></div>
-          <h1 id="login-title">One gateway.<br /><span>Controlled access.</span></h1>
-          <p>A private command interface for protected systems, operational environments, and authorized control domains.</p>
-
-          <div className="system-map" aria-label="Protected service topology">
-            <div className="system-orbit system-orbit--outer" />
-            <div className="system-orbit system-orbit--inner" />
-            <div className="system-core"><span>DC</span><small>ACCESS CORE</small></div>
-            <div className="orbit-node orbit-node--one"><span /> NODE 01</div>
-            <div className="orbit-node orbit-node--two"><span /> NODE 02</div>
-            <div className="orbit-node orbit-node--three"><span /> NODE 03</div>
-          </div>
-        </section>
-
         <section className="access-panel" aria-label="Secure sign in">
           <div className="access-panel__topline">
             <div><span className="section-kicker">Authorized access</span><h2>Restricted gateway</h2></div>
@@ -330,6 +317,76 @@ function LightingView({ state, onToggle, onScene }: { state: DemoState; onToggle
   return <div className="dashboard-content"><DetailIntro code="LT" eyebrow="Lighting domain" title="Room and exterior lighting" description="Kasa switches, dimmers, scenes, and schedules will be organized here by space." badge="Kasa pending" /><Panel><PanelHeading eyebrow="Interactive preview" title="Lighting circuits" action={<StateBadge tone="sample">Demo controls</StateBadge>} /><div className="light-grid">{(Object.keys(state.lights) as LightId[]).map((id, index) => { const active = state.lights[id]; return <button className={`light-card ${active ? "light-card--active" : ""}`} type="button" key={id} onClick={() => onToggle(id)} aria-pressed={active}><span className="light-number">0{index + 1}</span><div className="bulb-glyph"><i /></div><div><strong>{lightLabels[id]}</strong><span>{active ? "On · 100%" : "Off"}</span></div><span className="toggle"><i /></span></button>; })}</div></Panel><Panel><PanelHeading eyebrow="Whole-home presets" title="Scenes" action={<StateBadge tone="sample">Interactive</StateBadge>} /><QuickScenes current={state.scene} onSelect={onScene} /></Panel></div>;
 }
 
+function MissionControlView() {
+  const readouts = [
+    { code: "H", label: "Human signatures", value: "01", detail: "Simulated" },
+    { code: "A", label: "Animal signatures", value: "02", detail: "Simulated" },
+    { code: "Z", label: "Illustrative zones", value: "04", detail: "Sample layout" },
+    { code: "RF", label: "Live sensor links", value: "00", detail: "Not connected" },
+  ];
+  const plannedSources = [
+    ["CSI", "Wi-Fi channel sensing", "Future experiment"],
+    ["RAD", "Room radar presence", "Future integration"],
+    ["CAM", "Protect classifications", "Future confirmation"],
+    ["HA", "Home Assistant fusion", "No entities created"],
+  ];
+
+  return (
+    <div className="dashboard-content">
+      <DetailIntro
+        code="MC"
+        eyebrow="Mission control / RF perception"
+        title="Invisible occupancy intelligence"
+        description="A future view for privacy-minded room activity, human-or-animal confidence, and multi-sensor confirmation. Everything shown below is illustrative."
+        badge="Demo mode only"
+      />
+
+      <div className="mission-layout">
+        <Panel className="mission-map-panel">
+          <PanelHeading eyebrow="Illustrative telemetry" title="Residence RF activity map" action={<StateBadge tone="sample">Synthetic feed</StateBadge>} />
+          <div className="rf-map" role="img" aria-label="Demo floor plan showing one simulated human signature and two simulated animal signatures">
+            <div className="rf-map__grid" aria-hidden="true" />
+            <div className="rf-map__scan" aria-hidden="true" />
+            <div className="rf-room rf-room--living"><span>Living / Kitchen</span></div>
+            <div className="rf-room rf-room--entry"><span>Entry</span></div>
+            <div className="rf-room rf-room--bedroom"><span>Primary</span></div>
+            <div className="rf-room rf-room--office"><span>Office</span></div>
+
+            <span className="rf-node rf-node--one"><i /><small>RX-01</small></span>
+            <span className="rf-node rf-node--two"><i /><small>RX-02</small></span>
+            <span className="rf-node rf-node--three"><i /><small>RX-03</small></span>
+
+            <span className="rf-signature rf-signature--human"><i /><b>H-01</b><small>HUMAN / SIM</small></span>
+            <span className="rf-signature rf-signature--animal-one"><i /><b>A-01</b><small>ANIMAL / SIM</small></span>
+            <span className="rf-signature rf-signature--animal-two"><i /><b>A-02</b><small>ANIMAL / SIM</small></span>
+            <span className="rf-map__watermark">SYNTHETIC FEED / NO LIVE RF INPUT</span>
+          </div>
+          <div className="rf-legend"><span><i className="rf-legend__human" />Human sample</span><span><i className="rf-legend__animal" />Animal sample</span><span><i className="rf-legend__node" />Planned receiver</span></div>
+        </Panel>
+
+        <Panel className="mission-readout-panel">
+          <PanelHeading eyebrow="Sample readout" title="Perception summary" action={<StateBadge>Offline</StateBadge>} />
+          <div className="mission-readouts">
+            {readouts.map((item) => <div className="mission-readout" key={item.code}><span>{item.code}</span><div><strong>{item.label}</strong><small>{item.detail}</small></div><b>{item.value}</b></div>)}
+          </div>
+          <div className="mission-demo-note"><StatusDot tone="amber" /><p><strong>Placeholder visualization</strong><span>These markers do not represent anyone currently inside the residence.</span></p></div>
+        </Panel>
+      </div>
+
+      <div className="mission-lower-grid">
+        <Panel>
+          <PanelHeading eyebrow="Future architecture" title="Planned perception stack" action={<StateBadge>Not commissioned</StateBadge>} />
+          <div className="mission-stack">{plannedSources.map(([code, name, status]) => <div key={code}><span>{code}</span><strong>{name}</strong><small>{status}</small><StateBadge>Pending</StateBadge></div>)}</div>
+        </Panel>
+        <Panel className="mission-guardrail">
+          <div className="mission-guardrail__code">LOCK</div>
+          <div><span className="section-kicker">Demo safety boundary</span><h3>Observation only. No actions.</h3><p>No sensing hardware, Home Assistant entities, alarm rules, locks, notifications, or dispatch workflows are connected to Mission Control.</p></div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
 function NetworkView() {
   return <div className="dashboard-content"><DetailIntro code="NW" eyebrow="Network domain" title="UniFi infrastructure" description="Gateway, switching, wireless health, connected clients, and PoE status will appear here." badge="UniFi pending" /><div className="detail-grid detail-grid--network"><Panel className="network-map-panel"><PanelHeading eyebrow="Planned topology" title="Residence network" action={<StateBadge>Not connected</StateBadge>} /><div className="topology">{[["GW", "UniFi gateway", "Adoption pending"], ["CK", "Cloud Key Gen2", "Controller endpoint"], ["16", "16-port PoE switch", "Port data pending"], ["AP", "AC Lite", "Wireless data pending"]].map(([code, name, detail], index) => <div className="topology-node" key={name}><span>{code}</span><div><strong>{name}</strong><small>{detail}</small></div>{index < 3 && <i />}</div>)}</div></Panel><Panel><PanelHeading eyebrow="Preview telemetry" title="Network health" /><div className="network-metrics">{[["WAN status", "—"], ["Active clients", "—"], ["PoE draw", "—"], ["Wi-Fi experience", "—"]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><small>Awaiting data</small></div>)}</div><div className="device-note"><StatusDot tone="amber" /><p><strong>Local UniFi account required</strong><span>The Home Assistant connection will use a dedicated local controller user.</span></p></div></Panel></div></div>;
 }
@@ -395,6 +452,7 @@ function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; 
 
   let content: ReactNode;
   switch (activeView) {
+    case "mission": content = <MissionControlView />; break;
     case "security": content = <SecurityView state={demoState} onArm={toggleSecurity} />; break;
     case "climate": content = <ClimateView state={demoState} onTemperature={setTemperature} />; break;
     case "lighting": content = <LightingView state={demoState} onToggle={toggleLight} onScene={selectScene} />; break;
