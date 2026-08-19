@@ -70,7 +70,7 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
   return (
     <div className={`brand-lockup ${compact ? "brand-lockup--compact" : ""}`}>
       <div className="brand-mark" aria-hidden="true"><span>D</span><i /></div>
-      <div><strong>Dover Controls</strong>{!compact && <small>Residential Operations Network</small>}</div>
+      <div><strong>Dover Controls</strong>{!compact && <small>Secure Operations Gateway</small>}</div>
     </div>
   );
 }
@@ -101,7 +101,7 @@ function getAuthErrorMessage(error: unknown): string {
     case "auth/network-request-failed":
       return "The authentication service could not be reached. Check your connection.";
     case "auth/operation-not-allowed":
-      return "Email and password access has not been enabled in Firebase yet.";
+      return "Email and password access is not currently available.";
     default:
       return "Unable to authenticate. Verify your credentials and try again.";
   }
@@ -171,35 +171,35 @@ function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
       <div className="secure-grid" />
       <header className="login-header">
         <BrandMark />
-        <div className="prototype-pill prototype-pill--secure"><StatusDot tone="green" /> Private / Authenticated</div>
+        <div className="prototype-pill prototype-pill--secure"><StatusDot tone="green" /> Restricted / Authorization Required</div>
       </header>
 
       <div className="login-main">
         <section className="login-intro" aria-labelledby="login-title">
-          <div className="eyebrow"><span>DC-HOME-01</span><span className="eyebrow-rule" /><span>Residence command</span></div>
-          <h1 id="login-title">Your home,<br /><span>under control.</span></h1>
-          <p>A private operations center for comfort, security, lighting, and infrastructure at the Dover residence.</p>
+          <div className="eyebrow"><span>DC-GATEWAY-01</span><span className="eyebrow-rule" /><span>Controlled systems access</span></div>
+          <h1 id="login-title">One gateway.<br /><span>Controlled access.</span></h1>
+          <p>A private command interface for protected systems, operational environments, and authorized control domains.</p>
 
-          <div className="system-map" aria-label="Planned system connections">
+          <div className="system-map" aria-label="Protected service topology">
             <div className="system-orbit system-orbit--outer" />
             <div className="system-orbit system-orbit--inner" />
-            <div className="system-core"><span>DC</span><small>CONTROL CORE</small></div>
-            <div className="orbit-node orbit-node--one"><span /> UNIFI</div>
-            <div className="orbit-node orbit-node--two"><span /> ECOBEE</div>
-            <div className="orbit-node orbit-node--three"><span /> KASA</div>
+            <div className="system-core"><span>DC</span><small>ACCESS CORE</small></div>
+            <div className="orbit-node orbit-node--one"><span /> NODE 01</div>
+            <div className="orbit-node orbit-node--two"><span /> NODE 02</div>
+            <div className="orbit-node orbit-node--three"><span /> NODE 03</div>
           </div>
         </section>
 
         <section className="access-panel" aria-label="Secure sign in">
           <div className="access-panel__topline">
-            <div><span className="section-kicker">Authorized access</span><h2>Residence portal</h2></div>
+            <div><span className="section-kicker">Authorized access</span><h2>Restricted gateway</h2></div>
             <div className="access-glyph" aria-hidden="true"><i /></div>
           </div>
-          <div className="notice notice--secure"><StatusDot tone="green" /><div><strong>Secure account access</strong><span>Home systems remain in simulation mode.</span></div></div>
+          <div className="notice notice--secure"><StatusDot tone="green" /><div><strong>Identity verification required</strong><span>System details are withheld until authentication.</span></div></div>
 
           <form onSubmit={submit} className="access-form">
-            <label htmlFor="email">Email address</label>
-            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="owner@dovercontrols.com" autoComplete="email" disabled={busyAction !== null} required aria-invalid={messageTone === "error" && message.length > 0} />
+            <label htmlFor="email">Operator email</label>
+            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="operator@dovercontrols.com" autoComplete="email" disabled={busyAction !== null} required aria-invalid={messageTone === "error" && message.length > 0} />
             <div className="password-label">
               <label htmlFor="password">Access passphrase</label>
               <button className="text-button" type="button" onClick={() => setShowPassword((value) => !value)} disabled={busyAction !== null}>{showPassword ? "Hide" : "Show"}</button>
@@ -212,15 +212,15 @@ function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
             {message && <p className={`form-message form-message--${messageTone}`} role="status" aria-live="polite">{message}</p>}
             <button type="submit" className="primary-button" disabled={busyAction !== null} aria-busy={busyAction === "signin"}><span>{busyAction === "signin" ? "Authenticating…" : "Authenticate"}</span><span aria-hidden="true">→</span></button>
           </form>
-          <p className="privacy-note">No public account registration is offered in this portal.</p>
+          <p className="privacy-note">No public registration. Authorized identities only.</p>
           <div className="terminal-strip">
             <MiniStatus label="Node" value="READY" tone="green" />
-            <MiniStatus label="Authentication" value="FIREBASE" tone="green" />
-            <MiniStatus label="Home systems" value="PENDING" tone="amber" />
+            <MiniStatus label="Identity service" value="ONLINE" tone="green" />
+            <MiniStatus label="Protected services" value="RESTRICTED" tone="amber" />
           </div>
         </section>
       </div>
-      <footer className="login-footer"><span>Private system · Authorized users only</span><span>Firebase authentication / Simulation</span></footer>
+      <footer className="login-footer"><span>Restricted interface · Authorized identities only</span><span>Identity verification / Restricted access</span></footer>
     </main>
   );
 }
@@ -236,7 +236,7 @@ function AuthLoadingScreen() {
         <div className="auth-loading__ring" aria-hidden="true"><span /></div>
         <span className="section-kicker">Secure session</span>
         <h1>Verifying authorization</h1>
-        <p>Connecting to the Dover Controls identity service.</p>
+        <p>Establishing a secure identity session.</p>
       </section>
     </main>
   );

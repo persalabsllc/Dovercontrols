@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Dover Controls",
-  description: "Private residential operations and control center.",
+  description: "Private access gateway for protected systems and operational environments.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };
 
