@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { FirebaseError } from "firebase/app";
@@ -29,7 +30,8 @@ type View =
   | "network"
   | "cameras"
   | "utilities"
-  | "connections";
+  | "connections"
+  | "settings";
 
 type LightId = "living" | "kitchen" | "bedroom" | "exterior";
 
@@ -86,6 +88,23 @@ function MiniStatus({ label, value, tone = "cyan" }: { label: string; value: str
 }
 
 type AuthAction = "signin" | "reset";
+type AccountAction = "reset" | "logout";
+
+function getOperatorIdentity(user: User): { displayName: string; initials: string } {
+  const emailName = user.email?.split("@")[0] ?? "";
+  const fallbackName = emailName
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+  const displayName = user.displayName?.trim() || fallbackName || "Authorized operator";
+  const nameParts = displayName.split(/\s+/).filter(Boolean);
+  const initials = nameParts.length > 1
+    ? `${nameParts[0][0]}${nameParts[nameParts.length - 1][0]}`
+    : displayName.slice(0, 2);
+
+  return { displayName, initials: initials.toUpperCase() };
+}
 
 function getAuthErrorMessage(error: unknown): string {
   if (!(error instanceof FirebaseError)) {
@@ -107,6 +126,16 @@ function getAuthErrorMessage(error: unknown): string {
     default:
       return "Unable to authenticate. Verify your credentials and try again.";
   }
+}
+
+function getAccountActionErrorMessage(error: unknown, action: AccountAction): string {
+  if (error instanceof FirebaseError && error.code === "auth/network-request-failed") {
+    return "The identity service could not be reached. Check your connection and try again.";
+  }
+
+  return action === "reset"
+    ? "The password-change email could not be sent. Please try again."
+    : "The secure session could not be ended. Please try again.";
 }
 
 function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
@@ -410,11 +439,94 @@ function ConnectionsView() {
   return <div className="dashboard-content"><DetailIntro code="CN" eyebrow="Connection center" title="Systems and integrations" description="This is the commissioning plan for the local Home Assistant core and every connected platform." badge="1 of 5 ready" /><div className="connection-card-grid">{systems.map((system) => <Panel className={`connection-detail ${system.ready ? "connection-detail--ready" : ""}`} key={system.code}><div className="connection-detail__head"><div className={`connection-icon ${system.ready ? "connection-icon--ready" : ""}`}>{system.code}</div><StateBadge tone={system.ready ? "ready" : "pending"}>{system.badge}</StateBadge></div><h3>{system.name}</h3><p>{system.detail}</p><div className="progress-line"><i style={{ width: system.ready ? "100%" : "0%" }} /></div><small>{system.foot}</small></Panel>)}</div><Panel className="commission-panel"><div><span className="section-kicker">Next milestone</span><h3>Commission the local control core</h3><p>Once Home Assistant OS is running, we can replace the mock provider with live entities while keeping this interface intact.</p></div><span className="commission-number">01</span></Panel></div>;
 }
 
-function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; userEmail: string | null }) {
+function AccountSettingsView({ email, busyAction, onPasswordReset, onSignOut }: { email: string | null; busyAction: AccountAction | null; onPasswordReset: () => void; onSignOut: () => void }) {
+  return (
+    <div className="dashboard-content">
+      <DetailIntro code="ID" eyebrow="Operator account" title="Identity and access" description="Review the authenticated account, update its password securely, or terminate the current session." badge="Session active" />
+      <div className="detail-grid detail-grid--wide account-settings-grid">
+        <Panel>
+          <PanelHeading eyebrow="Current identity" title="Authenticated operator" action={<StateBadge tone="ready">Verified</StateBadge>} />
+          <div className="account-detail-list">
+            <div><span>Operator email</span><strong>{email ?? "Email unavailable"}</strong></div>
+            <div><span>Authorization method</span><strong>Email and password</strong></div>
+            <div><span>Session status</span><strong className="account-session-status"><StatusDot tone="green" /> Active</strong></div>
+          </div>
+        </Panel>
+        <Panel>
+          <PanelHeading eyebrow="Security controls" title="Account actions" />
+          <div className="account-security-list">
+            <div className="account-security-item">
+              <div><strong>Change password</strong><p>Receive a secure Firebase link at the authenticated email address.</p></div>
+              <button className="account-secondary-button" type="button" onClick={onPasswordReset} disabled={busyAction !== null}>{busyAction === "reset" ? "Sending…" : "Email secure link"}</button>
+            </div>
+            <div className="account-security-item account-security-item--danger">
+              <div><strong>Terminate session</strong><p>Sign out of Dover Controls on this device.</p></div>
+              <button className="account-danger-button" type="button" onClick={onSignOut} disabled={busyAction !== null}>{busyAction === "logout" ? "Signing out…" : "Log out"}</button>
+            </div>
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function AccountControl({ displayName, email, initials, busyAction, onOpenSettings, onPasswordReset, onSignOut }: { displayName: string; email: string | null; initials: string; busyAction: AccountAction | null; onOpenSettings: () => void; onPasswordReset: () => void; onSignOut: () => void }) {
+  const [open, setOpen] = useState(false);
+  const controlRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function closeOnOutsidePress(event: PointerEvent) {
+      if (!controlRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePress);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function select(action: () => void) {
+    setOpen(false);
+    action();
+  }
+
+  return (
+    <div className="account-control" ref={controlRef}>
+      <button ref={triggerRef} className="account-trigger" type="button" onClick={() => setOpen((value) => !value)} aria-label="Open operator account controls" aria-expanded={open} aria-controls="operator-account-panel">
+        <span className="account-trigger__avatar">{initials}</span><span className="account-trigger__chevron" aria-hidden="true">⌄</span>
+      </button>
+      {open && (
+        <div id="operator-account-panel" className="account-popover" role="region" aria-label="Operator account controls">
+          <div className="account-popover__identity"><span className="section-kicker">Operator control</span><strong>{displayName}</strong><small>{email ?? "Authenticated identity"}</small></div>
+          <div className="account-popover__status"><StatusDot tone="green" /><span>Secure session active</span></div>
+          <div className="account-popover__actions" aria-label="Account actions">
+            <button type="button" onClick={() => select(onOpenSettings)}><span className="account-action__code">ST</span><span className="account-action__copy"><strong>Account settings</strong><small>Identity and access</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
+            <button type="button" onClick={() => select(onPasswordReset)} disabled={busyAction !== null}><span className="account-action__code">PW</span><span className="account-action__copy"><strong>Change password</strong><small>Email a secure link</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
+            <button className="account-popover__logout" type="button" onClick={() => select(onSignOut)} disabled={busyAction !== null}><span className="account-action__code">EX</span><span className="account-action__copy"><strong>Log out</strong><small>Terminate this session</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user: User }) {
   const [activeView, setActiveView] = useState<View>("overview");
   const [now, setNow] = useState(() => new Date(0));
   const [toast, setToast] = useState("");
   const [demoState, setDemoState] = useState<DemoState>(initialDemoState);
+  const [accountAction, setAccountAction] = useState<AccountAction | null>(null);
+  const { displayName, initials } = useMemo(() => getOperatorIdentity(user), [user]);
 
   useEffect(() => {
     let loadTimer: number | undefined;
@@ -444,6 +556,31 @@ function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; 
   function toggleLight(id: LightId) { const lights = { ...demoState.lights, [id]: !demoState.lights[id] }; applyState({ ...demoState, lights }, `${lightLabels[id]} ${lights[id] ? "turned on" : "turned off"}`); }
   function setTemperature(value: number) { const bounded = Math.min(80, Math.max(60, value)); applyState({ ...demoState, targetTemperature: bounded }, `Climate target set to ${bounded}°`); }
   function toggleSecurity() { const securityMode = demoState.securityMode === "Armed" ? "Standby" : "Armed"; applyState({ ...demoState, securityMode }, `Security preview set to ${securityMode}`); }
+  async function requestPasswordReset() {
+    if (!user.email) {
+      notify("No email address is available for this authenticated account.");
+      return;
+    }
+
+    setAccountAction("reset");
+    try {
+      await sendPasswordResetEmail(getFirebaseAuth(), user.email);
+      notify(`A secure password-change link was sent to ${user.email}.`);
+    } catch (error) {
+      notify(getAccountActionErrorMessage(error, "reset"));
+    } finally {
+      setAccountAction(null);
+    }
+  }
+  async function terminateSession() {
+    setAccountAction("logout");
+    try {
+      await onExit();
+    } catch (error) {
+      setAccountAction(null);
+      notify(getAccountActionErrorMessage(error, "logout"));
+    }
+  }
 
   const clockReady = now.getTime() > 0;
   const formattedTime = useMemo(() => clockReady ? now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--:--", [clockReady, now]);
@@ -460,9 +597,10 @@ function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; 
     case "cameras": content = <CamerasView />; break;
     case "utilities": content = <UtilitiesView />; break;
     case "connections": content = <ConnectionsView />; break;
+    case "settings": content = <AccountSettingsView email={user.email} busyAction={accountAction} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} />; break;
     default: content = <Overview state={demoState} onScene={selectScene} onNavigate={setActiveView} />;
   }
-  const activeLabel = navItems.find((item) => item.id === activeView)?.label ?? "Overview";
+  const activeLabel = activeView === "settings" ? "Account settings" : navItems.find((item) => item.id === activeView)?.label ?? "Overview";
 
   return (
     <main className="dashboard-shell">
@@ -470,10 +608,10 @@ function Dashboard({ onExit, userEmail }: { onExit: () => void | Promise<void>; 
         <div className="sidebar-brand"><BrandMark compact /></div>
         <nav className="desktop-nav" aria-label="Dashboard sections"><span className="nav-heading">Command domains</span>{navItems.map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span>{item.label}{activeView === item.id && <i />}</button>)}</nav>
         <div className="sidebar-status"><span className="nav-heading">System status</span><div><StatusDot tone="green" /><p><strong>Portal ready</strong><small>Simulation mode</small></p></div><div><StatusDot tone="amber" /><p><strong>HA disconnected</strong><small>Awaiting local core</small></p></div></div>
-        <button className="profile-card" type="button" onClick={() => void onExit()} aria-label={userEmail ? `Sign out ${userEmail}` : "Sign out"} title={userEmail ?? "Signed-in account"}><span className="avatar">KK</span><span><strong>Kyle</strong><small>Sign out</small></span><i>↗</i></button>
+        <button className="profile-card" type="button" onClick={() => setActiveView("settings")} aria-label={`Open account settings for ${user.email ?? displayName}`} title={user.email ?? "Signed-in account"}><span className="avatar">{initials}</span><span><strong>{displayName}</strong><small>Account settings</small></span><i>›</i></button>
       </aside>
       <section className="dashboard-main">
-        <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, Kyle.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><button className="alert-button" type="button" aria-label="No active alerts"><i /><span>0</span></button></div></header>
+        <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, {displayName}.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><AccountControl displayName={displayName} email={user.email} initials={initials} busyAction={accountAction} onOpenSettings={() => setActiveView("settings")} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} /></div></header>
         <div className="simulation-banner" role="status"><div><StatusDot tone="amber" /><strong>Simulation mode</strong><span>Home Assistant is not connected. Controls update this preview only.</span></div><StateBadge tone="sample">No active alerts</StateBadge></div>
         {content}
       </section>
@@ -517,5 +655,5 @@ export default function Home() {
   if (!authReady) return <AuthLoadingScreen />;
   if (!user) return <LoginScreen initialMessage={authInitializationMessage} />;
 
-  return <Dashboard userEmail={user.email} onExit={() => signOut(getFirebaseAuth())} />;
+  return <Dashboard user={user} onExit={() => signOut(getFirebaseAuth())} />;
 }
