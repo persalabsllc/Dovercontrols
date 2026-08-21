@@ -27,11 +27,15 @@ export function adminPassword(): string {
 }
 
 export function homeAssistantBaseUrl(): string {
-  return requireEnv("HOME_ASSISTANT_URL").replace(/\/$/, "");
+  const value = process.env.HOME_ASSISTANT_URL || process.env.HA_BASE_URL;
+  if (!value) throw new Error("Missing HOME_ASSISTANT_URL or HA_BASE_URL");
+  return value.replace(/\/$/, "");
 }
 
 export function homeAssistantToken(): string {
-  return requireEnv("HOME_ASSISTANT_TOKEN");
+  const value = process.env.HOME_ASSISTANT_TOKEN || process.env.HA_ACCESS_TOKEN;
+  if (!value) throw new Error("Missing HOME_ASSISTANT_TOKEN or HA_ACCESS_TOKEN");
+  return value;
 }
 
 export function base64url(input: Buffer | string): string {
