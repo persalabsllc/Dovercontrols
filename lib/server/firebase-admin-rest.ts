@@ -8,7 +8,15 @@ const FIREBASE_PROJECT_ID = "dovercontrols";
 const FIREBASE_WEB_API_KEY = "AIzaSyBsAilApy0bezl_ENzgfTRlLXCOAWxsOPY";
 const IDENTITY_TOOLKIT_ORIGIN = "https://identitytoolkit.googleapis.com";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_STS_URL = "https://sts.googleapis.com/v1/token";
+const GOOGLE_IAM_CREDENTIALS_ORIGIN = "https://iamcredentials.googleapis.com";
 const IDENTITY_TOOLKIT_SCOPE = "https://www.googleapis.com/auth/identitytoolkit";
+const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+const DEFAULT_GCP_PROJECT_NUMBER = "812439006468";
+const DEFAULT_GCP_SERVICE_ACCOUNT_EMAIL =
+  "dover-controls-web-admin@dovercontrols.iam.gserviceaccount.com";
+const DEFAULT_GCP_WORKLOAD_IDENTITY_POOL_ID = "vercel-dovercontrols";
+const DEFAULT_GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID = "vercel";
 const REQUEST_TIMEOUT_MS = 8_000;
 
 type ServiceAccount = {
@@ -36,6 +44,18 @@ type TokenResponse = {
   access_token?: string;
   expires_in?: number;
   token_type?: string;
+};
+
+type ImpersonatedTokenResponse = {
+  accessToken?: string;
+  expireTime?: string;
+};
+
+type WorkloadIdentityConfig = {
+  projectNumber: string;
+  serviceAccountEmail: string;
+  poolId: string;
+  providerId: string;
 };
 
 type FirebaseUserInfo = {
@@ -140,7 +160,7 @@ function base64url(value: string | Buffer): string {
   return Buffer.from(value).toString("base64url");
 }
 
-async function requestAccessToken(): Promise<AccessToken> {
+async function requestServiceAccountAccessToken(): Promise<AccessToken> {
   const account = parseServiceAccount();
   const issuedAt = Math.floor(Date.now() / 1_000) - 30;
   const header: Record<string, string> = { alg: "RS256", typ: "JWT" };
@@ -211,13 +231,161 @@ async function requestAccessToken(): Promise<AccessToken> {
   };
 }
 
-async function getAccessToken(): Promise<string> {
+function workloadIdentityConfig(): WorkloadIdentityConfig {
+  const projectNumber =
+    process.env.GCP_PROJECT_NUMBER?.trim() || DEFAULT_GCP_PROJECT_NUMBER;
+  const serviceAccountEmail =
+    process.env.GCP_SERVICE_ACCOUNT_EMAIL?.trim() || DEFAULT_GCP_SERVICE_ACCOUNT_EMAIL;
+  const poolId =
+    process.env.GCP_WORKLOAD_IDENTITY_POOL_ID?.trim() ||
+    DEFAULT_GCP_WORKLOAD_IDENTITY_POOL_ID;
+  const providerId =
+    process.env.GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID?.trim() ||
+    DEFAULT_GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID;
+
+  if (
+    !/^\d{6,20}$/.test(projectNumber) ||
+    !/^[a-z][a-z0-9-]{3,31}$/.test(poolId) ||
+    !/^[a-z][a-z0-9-]{3,31}$/.test(providerId) ||
+    !/^[a-z0-9-]+@dovercontrols\.iam\.gserviceaccount\.com$/.test(serviceAccountEmail)
+  ) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_not_configured");
+  }
+
+  return { projectNumber, serviceAccountEmail, poolId, providerId };
+}
+
+function vercelOidcToken(request: Request): string {
+  const token =
+    request.headers.get("x-vercel-oidc-token")?.trim() ||
+    process.env.VERCEL_OIDC_TOKEN?.trim() ||
+    "";
+
+  if (!token || token.length > 16_384 || token.split(".").length !== 3) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_not_configured");
+  }
+  return token;
+}
+
+async function requestWorkloadIdentityAccessToken(request: Request): Promise<AccessToken> {
+  const config = workloadIdentityConfig();
+  const audience =
+    `//iam.googleapis.com/projects/${config.projectNumber}` +
+    `/locations/global/workloadIdentityPools/${config.poolId}` +
+    `/providers/${config.providerId}`;
+  const exchangeBody = new URLSearchParams({
+    audience,
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+    scope: CLOUD_PLATFORM_SCOPE,
+    subject_token: vercelOidcToken(request),
+    subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+  });
+
+  let exchangeResponse: Response;
+  try {
+    exchangeResponse = await fetch(GOOGLE_STS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: exchangeBody,
+      cache: "no-store",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  if (!exchangeResponse.ok) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_authorization_failed");
+  }
+
+  let exchange: TokenResponse;
+  try {
+    exchange = (await exchangeResponse.json()) as TokenResponse;
+  } catch {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  if (
+    typeof exchange.access_token !== "string" ||
+    !exchange.access_token ||
+    exchange.token_type !== "Bearer"
+  ) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  const serviceAccount = encodeURIComponent(config.serviceAccountEmail);
+  let impersonationResponse: Response;
+  try {
+    impersonationResponse = await fetch(
+      `${GOOGLE_IAM_CREDENTIALS_ORIGIN}/v1/projects/-/serviceAccounts/` +
+        `${serviceAccount}:generateAccessToken`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${exchange.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scope: [IDENTITY_TOOLKIT_SCOPE],
+          lifetime: "3600s",
+        }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      },
+    );
+  } catch {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  if (!impersonationResponse.ok) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_authorization_failed");
+  }
+
+  let impersonated: ImpersonatedTokenResponse;
+  try {
+    impersonated = (await impersonationResponse.json()) as ImpersonatedTokenResponse;
+  } catch {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  const expiresAt = impersonated.expireTime
+    ? Date.parse(impersonated.expireTime)
+    : Number.NaN;
+  if (
+    typeof impersonated.accessToken !== "string" ||
+    !impersonated.accessToken ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now()
+  ) {
+    throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
+  }
+
+  return { value: impersonated.accessToken, expiresAt };
+}
+
+async function requestAccessToken(request: Request): Promise<AccessToken> {
+  const isVercelRuntime = process.env.VERCEL === "1" ||
+    Boolean(request.headers.get("x-vercel-oidc-token")) ||
+    Boolean(process.env.VERCEL_OIDC_TOKEN?.trim());
+
+  // Deployed functions must always use Vercel's short-lived identity. A stale
+  // legacy JSON value must never silently override the keyless production path.
+  if (isVercelRuntime) return requestWorkloadIdentityAccessToken(request);
+
+  return process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON?.trim()
+    ? requestServiceAccountAccessToken()
+    : requestWorkloadIdentityAccessToken(request);
+}
+
+async function getAccessToken(request: Request): Promise<string> {
   if (accessTokenCache && accessTokenCache.expiresAt - 60_000 > Date.now()) {
     return accessTokenCache.value;
   }
 
   if (!accessTokenRequest) {
-    accessTokenRequest = requestAccessToken().finally(() => {
+    accessTokenRequest = requestAccessToken(request).finally(() => {
       accessTokenRequest = null;
     });
   }
@@ -254,13 +422,13 @@ function mappedGoogleError(response: Response, payload: GoogleErrorPayload | nul
 async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
+  request: Request,
 ): Promise<T> {
-  const account = parseServiceAccount();
   const url = new URL(path, IDENTITY_TOOLKIT_ORIGIN);
 
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+  headers.set("Authorization", `Bearer ${await getAccessToken(request)}`);
   if (init.body) headers.set("Content-Type", "application/json");
 
   let response: Response;
@@ -290,9 +458,6 @@ async function adminRequest<T>(
     throw mappedGoogleError(response, payload as GoogleErrorPayload);
   }
 
-  if (account.projectId !== FIREBASE_PROJECT_ID) {
-    throw new FirebaseAdminRestError(503, "firebase_admin_not_configured");
-  }
   return payload as T;
 }
 
@@ -350,7 +515,7 @@ export function toOperatorUser(
   };
 }
 
-export async function listFirebaseUsers(): Promise<FirebaseAdminUser[]> {
+export async function listFirebaseUsers(request: Request): Promise<FirebaseAdminUser[]> {
   const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
   const users: FirebaseAdminUser[] = [];
   let nextPageToken = "";
@@ -360,6 +525,8 @@ export async function listFirebaseUsers(): Promise<FirebaseAdminUser[]> {
     if (nextPageToken) query.set("nextPageToken", nextPageToken);
     const payload = await adminRequest<FirebaseUsersResponse>(
       `/v1/projects/${projectId}/accounts:batchGet?${query.toString()}`,
+      {},
+      request,
     );
     for (const candidate of payload.users ?? []) {
       const user = normalizeFirebaseUser(candidate);
@@ -372,11 +539,15 @@ export async function listFirebaseUsers(): Promise<FirebaseAdminUser[]> {
   throw new FirebaseAdminRestError(503, "firebase_admin_user_limit_exceeded");
 }
 
-export async function getFirebaseUser(uid: string): Promise<FirebaseAdminUser> {
+export async function getFirebaseUser(
+  uid: string,
+  request: Request,
+): Promise<FirebaseAdminUser> {
   const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
   const payload = await adminRequest<FirebaseUsersResponse>(
     `/v1/projects/${projectId}/accounts:lookup`,
     { method: "POST", body: JSON.stringify({ localId: [uid] }) },
+    request,
   );
   const user = payload.users?.[0] ? normalizeFirebaseUser(payload.users[0]) : null;
   if (!user || user.uid !== uid) {
@@ -393,6 +564,7 @@ export async function updateFirebaseUser(
     password?: string;
     role?: OperatorRole;
   },
+  request: Request,
 ): Promise<FirebaseAdminUser> {
   const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
   const body: Record<string, unknown> = { localId: uid };
@@ -401,7 +573,7 @@ export async function updateFirebaseUser(
   if (updates.password !== undefined) body.password = updates.password;
 
   if (updates.role !== undefined) {
-    const current = await getFirebaseUser(uid);
+    const current = await getFirebaseUser(uid, request);
     const customClaims = { ...current.customClaims, doverRole: updates.role };
     const serialized = JSON.stringify(customClaims);
     if (Buffer.byteLength(serialized, "utf8") > 1_000) {
@@ -417,8 +589,9 @@ export async function updateFirebaseUser(
   await adminRequest(
     `/v1/projects/${projectId}/accounts:update`,
     { method: "POST", body: JSON.stringify(body) },
+    request,
   );
-  return getFirebaseUser(uid);
+  return getFirebaseUser(uid, request);
 }
 
 export async function createFirebaseUser(input: {
@@ -426,7 +599,7 @@ export async function createFirebaseUser(input: {
   displayName?: string;
   password: string;
   role: Exclude<OperatorRole, "owner">;
-}): Promise<FirebaseAdminUser> {
+}, request: Request): Promise<FirebaseAdminUser> {
   const body: Record<string, unknown> = {
     targetProjectId: FIREBASE_PROJECT_ID,
     email: input.email,
@@ -441,16 +614,17 @@ export async function createFirebaseUser(input: {
   const created = await adminRequest<FirebaseCreateResponse>(
     `/v1/accounts:signUp?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
     { method: "POST", body: JSON.stringify(body) },
+    request,
   );
   if (!created.localId) {
     throw new FirebaseAdminRestError(503, "firebase_admin_unavailable");
   }
 
   try {
-    return await updateFirebaseUser(created.localId, { role: input.role });
+    return await updateFirebaseUser(created.localId, { role: input.role }, request);
   } catch (error) {
     try {
-      await deleteFirebaseUser(created.localId);
+      await deleteFirebaseUser(created.localId, request);
     } catch {
       // Avoid masking the original role-assignment failure.
     }
@@ -458,20 +632,22 @@ export async function createFirebaseUser(input: {
   }
 }
 
-export async function deleteFirebaseUser(uid: string): Promise<void> {
+export async function deleteFirebaseUser(uid: string, request: Request): Promise<void> {
   const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
   await adminRequest(
     `/v1/projects/${projectId}/accounts:delete`,
     { method: "POST", body: JSON.stringify({ localId: uid }) },
+    request,
   );
 }
 
 export async function sendFirebasePasswordReset(
   uid: string,
   userIp: string,
+  request: Request,
 ): Promise<void> {
   const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
-  const user = await getFirebaseUser(uid);
+  const user = await getFirebaseUser(uid, request);
   await adminRequest(
     `/v1/projects/${projectId}/accounts:sendOobCode`,
     {
@@ -483,5 +659,6 @@ export async function sendFirebasePasswordReset(
         userIp,
       }),
     },
+    request,
   );
 }
