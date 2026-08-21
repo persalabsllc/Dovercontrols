@@ -1,0 +1,8 @@
+{
+  "client_id": "https://www.dovercontrols.com/.well-known/oauth-client/chatgpt.json",
+  "client_name": "ChatGPT",
+  "redirect_uris": ["https://chatgpt.com/connector/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
