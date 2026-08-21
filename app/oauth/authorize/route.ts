@@ -40,5 +40,5 @@ export async function POST(request: Request) {
   const now = Math.floor(Date.now()/1000);
   const code = signPayload({ typ:"code", iat:now, exp:now+300, client_id:clientId, redirect_uri:redirectUri, code_challenge:get("code_challenge"), scope:normalizeScopes(get("scope")) });
   const target = new URL(redirectUri); target.searchParams.set("code",code); if (get("state")) target.searchParams.set("state",get("state"));
-  return NextResponse.redirect(target);
+  return NextResponse.redirect(target, 303);
 }
