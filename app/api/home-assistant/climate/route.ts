@@ -22,16 +22,21 @@ const responseHeaders = {
 
 // Temporary distinct statuses make sanitized bridge failures visible in
 // provider access logs when function stdout is unavailable.
+const operatorDiagnosticStatus: Record<string, number> = {
+  identity_service_unavailable: 425,
+  operator_allowlist_not_configured: 428,
+};
+
 const bridgeDiagnosticStatus: Record<string, number> = {
-  bridge_not_configured: 550,
-  home_assistant_unreachable: 551,
-  home_assistant_authorization_failed: 552,
-  home_assistant_unavailable: 553,
-  invalid_home_assistant_response: 554,
-  invalid_climate_configuration: 555,
-  climate_entity_not_found: 556,
-  climate_command_failed: 557,
-  climate_command_unconfirmed: 558,
+  bridge_not_configured: 500,
+  home_assistant_unreachable: 504,
+  home_assistant_authorization_failed: 502,
+  home_assistant_unavailable: 503,
+  invalid_home_assistant_response: 422,
+  invalid_climate_configuration: 409,
+  climate_entity_not_found: 424,
+  climate_command_failed: 502,
+  climate_command_unconfirmed: 408,
 };
 
 const mutationWindows = new Map<string, number[]>();
@@ -56,7 +61,10 @@ function json(body: unknown, status = 200): Response {
 
 function errorResponse(error: unknown): Response {
   if (error instanceof OperatorAuthorizationError) {
-    return json({ error: error.code }, error.status);
+    return json(
+      { error: error.code },
+      operatorDiagnosticStatus[error.code] ?? error.status,
+    );
   }
   if (error instanceof HomeAssistantBridgeError) {
     console.error("[home-assistant-climate] bridge request failed", {
