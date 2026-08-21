@@ -137,14 +137,14 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
 
     const payload = await readJsonObject(request);
     if (payload instanceof Response) return payload;
-    const target = await getFirebaseUser(uid);
+    const target = await getFirebaseUser(uid, request);
     const isProtected = protectedOperator(owner.uid, target);
 
     if (payload.action === "send_password_reset") {
       if (Object.keys(payload).length !== 1 || isProtected) {
         return json({ error: isProtected ? "protected_owner_account" : "invalid_request" }, isProtected ? 403 : 400);
       }
-      await sendFirebasePasswordReset(uid, clientIp(request));
+      await sendFirebasePasswordReset(uid, clientIp(request), request);
       return noContent();
     }
 
@@ -178,7 +178,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       role: updates.role,
       disabled: updates.disabled,
       password: updates.temporaryPassword,
-    });
+    }, request);
     return json({ user: toOperatorUser(updated, effectiveFallbackRole(updated.email)) });
   } catch (error) {
     return errorResponse(error);
@@ -193,11 +193,11 @@ export async function DELETE(request: Request, context: RouteContext): Promise<R
     const { uid } = await context.params;
     if (!validUid(uid)) return json({ error: "invalid_operator_id" }, 400);
 
-    const target = await getFirebaseUser(uid);
+    const target = await getFirebaseUser(uid, request);
     if (protectedOperator(owner.uid, target)) {
       return json({ error: "protected_owner_account" }, 403);
     }
-    await deleteFirebaseUser(uid);
+    await deleteFirebaseUser(uid, request);
     return noContent();
   } catch (error) {
     return errorResponse(error);
