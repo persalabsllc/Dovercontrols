@@ -556,6 +556,21 @@ export async function getFirebaseUser(
   return user;
 }
 
+export async function findFirebaseUserByEmail(
+  email: string,
+  request: Request,
+): Promise<FirebaseAdminUser | null> {
+  const projectId = encodeURIComponent(FIREBASE_PROJECT_ID);
+  const normalizedEmail = email.trim().toLowerCase();
+  const payload = await adminRequest<FirebaseUsersResponse>(
+    `/v1/projects/${projectId}/accounts:lookup`,
+    { method: "POST", body: JSON.stringify({ email: [normalizedEmail] }) },
+    request,
+  );
+  const user = payload.users?.[0] ? normalizeFirebaseUser(payload.users[0]) : null;
+  return user?.email === normalizedEmail ? user : null;
+}
+
 export async function updateFirebaseUser(
   uid: string,
   updates: {
