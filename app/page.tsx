@@ -3,6 +3,7 @@
 import {
   type FormEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -37,16 +38,32 @@ type LightId = "living" | "kitchen" | "bedroom" | "exterior";
 
 type DemoState = {
   lights: Record<LightId, boolean>;
-  targetTemperature: number;
   scene: "Home" | "Away" | "Night" | "All Off";
   securityMode: "Standby" | "Armed";
+};
+
+type HomeAssistantConnection = "checking" | "connected" | "unavailable";
+
+type ClimateSnapshot = {
+  available: boolean;
+  name: string;
+  currentTemperature: number | null;
+  targetTemperature: number | null;
+  humidity: number | null;
+  hvacMode: string;
+  hvacAction: string | null;
+  fanMode: string | null;
+  presetMode: string | null;
+  temperatureUnit: string;
+  minTemperature: number;
+  maxTemperature: number;
+  updatedAt: string | null;
 };
 
 const STORAGE_KEY = "dover-controls-preview-v1";
 
 const initialDemoState: DemoState = {
   lights: { living: true, kitchen: true, bedroom: false, exterior: false },
-  targetTemperature: 70,
   scene: "Home",
   securityMode: "Standby",
 };
@@ -136,6 +153,70 @@ function getAccountActionErrorMessage(error: unknown, action: AccountAction): st
   return action === "reset"
     ? "The password-change email could not be sent. Please try again."
     : "The secure session could not be ended. Please try again.";
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isClimateSnapshot(value: unknown): value is ClimateSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ClimateSnapshot>;
+  return (
+    typeof candidate.available === "boolean" &&
+    typeof candidate.name === "string" &&
+    isNullableNumber(candidate.currentTemperature) &&
+    isNullableNumber(candidate.targetTemperature) &&
+    isNullableNumber(candidate.humidity) &&
+    typeof candidate.hvacMode === "string" &&
+    isNullableString(candidate.hvacAction) &&
+    isNullableString(candidate.fanMode) &&
+    isNullableString(candidate.presetMode) &&
+    typeof candidate.temperatureUnit === "string" &&
+    typeof candidate.minTemperature === "number" &&
+    typeof candidate.maxTemperature === "number" &&
+    isNullableString(candidate.updatedAt)
+  );
+}
+
+async function climateRequest(
+  user: User,
+  init: RequestInit = {},
+): Promise<ClimateSnapshot> {
+  async function execute(forceRefresh: boolean): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${await user.getIdToken(forceRefresh)}`);
+    if (init.body) headers.set("Content-Type", "application/json");
+
+    return fetch("/api/home-assistant/climate", {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+  }
+
+  let response = await execute(false);
+  if (response.status === 401) response = await execute(true);
+  if (!response.ok) throw new Error("Home Assistant bridge request failed");
+
+  const payload = (await response.json()) as unknown;
+  if (!isClimateSnapshot(payload)) throw new Error("Home Assistant bridge returned invalid data");
+  return payload;
+}
+
+function roundedTemperature(value: number | null): string {
+  return value === null ? "—" : String(Math.round(value));
+}
+
+function formatSystemState(value: string | null): string {
+  if (!value) return "Unknown";
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function LoginScreen({ initialMessage = "" }: { initialMessage?: string }) {
@@ -297,49 +378,84 @@ function QuickScenes({ current, onSelect }: { current: DemoState["scene"]; onSel
   return <div className="scene-grid">{scenes.map((scene) => <button className={`scene-button ${current === scene.name ? "scene-button--active" : ""}`} key={scene.name} type="button" onClick={() => onSelect(scene.name)}><span className="scene-code">{scene.code}</span><span><strong>{scene.name}</strong><small>{scene.detail}</small></span></button>)}</div>;
 }
 
-function Overview({ state, onScene, onNavigate }: { state: DemoState; onScene: (scene: DemoState["scene"]) => void; onNavigate: (view: View) => void }) {
+function Overview({ state, climate, connection, onScene, onNavigate }: { state: DemoState; climate: ClimateSnapshot | null; connection: HomeAssistantConnection; onScene: (scene: DemoState["scene"]) => void; onNavigate: (view: View) => void }) {
   const lightsOn = Object.values(state.lights).filter(Boolean).length;
+  const climateLive = connection === "connected" && climate?.available === true;
+  const currentTemperature = roundedTemperature(climateLive ? climate.currentTemperature : null);
+  const targetTemperature = roundedTemperature(climateLive ? climate.targetTemperature : null);
+  const humidity = climateLive && climate.humidity !== null ? `${Math.round(climate.humidity)}%` : "—";
   return (
     <div className="dashboard-content">
       <div className="overview-grid">
         <Panel className="command-panel">
-          <div className="command-copy"><span className="section-kicker">Residence status / Pre-commission</span><h2>Systems waiting for Home Assistant</h2><p>The Dover Controls interface is ready. Connect the home control core when your Raspberry Pi is online.</p><button className="link-button" type="button" onClick={() => onNavigate("connections")}>Review connection plan <span aria-hidden="true">→</span></button></div>
+          <div className="command-copy"><span className="section-kicker">Residence status / Commissioning</span><h2>{climateLive ? "Home Assistant link established" : "Connecting to Home Assistant"}</h2><p>{climateLive ? "Dover Controls is receiving live ecobee telemetry through the protected control bridge." : "The portal is online. Live climate telemetry will appear when the protected bridge responds."}</p><button className="link-button" type="button" onClick={() => onNavigate("connections")}>Review connection status <span aria-hidden="true">→</span></button></div>
           <div className="command-core" aria-hidden="true"><div className="core-ring core-ring--outer" /><div className="core-ring core-ring--inner" /><div className="core-center"><span>DC</span><small>READY</small></div><i className="core-node core-node--one" /><i className="core-node core-node--two" /><i className="core-node core-node--three" /></div>
-          <div className="command-footer"><span><StatusDot tone="green" /> Portal online</span><span><StatusDot tone="amber" /> HA link pending</span><span><StatusDot tone="amber" /> 3 integrations queued</span></div>
+          <div className="command-footer"><span><StatusDot tone="green" /> Portal online</span><span><StatusDot tone={climateLive ? "green" : "amber"} /> HA link {climateLive ? "live" : "pending"}</span><span><StatusDot tone={climateLive ? "green" : "amber"} /> ecobee {climateLive ? "live" : "pending"}</span></div>
         </Panel>
         <Panel className="scenes-panel"><PanelHeading eyebrow="Preview controls" title="Quick scenes" action={<StateBadge tone="sample">Demo</StateBadge>} /><QuickScenes current={state.scene} onSelect={onScene} /></Panel>
       </div>
 
       <div className="metric-grid">
         <button className="metric-card" type="button" onClick={() => onNavigate("security")}><span className="metric-top"><span className="metric-code">SC</span><StateBadge>Awaiting</StateBadge></span><strong>Security</strong><span className="metric-value">Standby</span><small>Sensors not commissioned</small><i className="metric-line" /></button>
-        <button className="metric-card" type="button" onClick={() => onNavigate("climate")}><span className="metric-top"><span className="metric-code">CL</span><StateBadge tone="sample">Preview data</StateBadge></span><strong>Climate</strong><span className="metric-value">72<span>°</span></span><small>Target {state.targetTemperature}° · Humidity 48%</small><i className="metric-line metric-line--cyan" /></button>
+        <button className="metric-card" type="button" onClick={() => onNavigate("climate")}><span className="metric-top"><span className="metric-code">CL</span><StateBadge tone={climateLive ? "ready" : "pending"}>{climateLive ? "Live" : connection === "checking" ? "Connecting" : "Unavailable"}</StateBadge></span><strong>Climate</strong><span className="metric-value">{currentTemperature}<span>°</span></span><small>Target {targetTemperature}° · Humidity {humidity}</small><i className="metric-line metric-line--cyan" /></button>
         <button className="metric-card" type="button" onClick={() => onNavigate("lighting")}><span className="metric-top"><span className="metric-code">LT</span><StateBadge tone="sample">Interactive</StateBadge></span><strong>Lighting</strong><span className="metric-value">{lightsOn}<span>/4</span></span><small>Demo circuits active</small><i className="metric-line metric-line--green" /></button>
         <button className="metric-card" type="button" onClick={() => onNavigate("network")}><span className="metric-top"><span className="metric-code">NW</span><StateBadge>Awaiting</StateBadge></span><strong>Network</strong><span className="metric-value metric-value--word">UniFi</span><small>Controller connection pending</small><i className="metric-line" /></button>
       </div>
 
       <div className="lower-grid">
         <Panel className="camera-panel"><PanelHeading eyebrow="Property view" title="Camera grid" action={<button className="text-button" type="button" onClick={() => onNavigate("cameras")}>All cameras →</button>} /><div className="camera-grid camera-grid--overview"><EmptyCamera name="Front approach" /><EmptyCamera name="Rear perimeter" /></div></Panel>
-        <Panel className="connections-panel"><PanelHeading eyebrow="Control plane" title="Connection center" action={<button className="text-button" type="button" onClick={() => onNavigate("connections")}>Manage →</button>} /><div className="connection-list"><ConnectionRow code="DC" name="Dover portal" detail="Interface layer" ready /><ConnectionRow code="HA" name="Home Assistant" detail="Local control core" /><ConnectionRow code="03" name="Device integrations" detail="UniFi · ecobee · Kasa" /></div></Panel>
+        <Panel className="connections-panel"><PanelHeading eyebrow="Control plane" title="Connection center" action={<button className="text-button" type="button" onClick={() => onNavigate("connections")}>Manage →</button>} /><div className="connection-list"><ConnectionRow code="DC" name="Dover portal" detail="Interface layer" ready /><ConnectionRow code="HA" name="Home Assistant" detail="Protected remote bridge" ready={connection === "connected"} /><ConnectionRow code="EC" name="ecobee" detail={climateLive ? "Live climate telemetry" : "Climate entity pending"} ready={climateLive} /></div></Panel>
       </div>
 
       <div className="lower-grid lower-grid--utilities">
         <Panel><PanelHeading eyebrow="Future expansion" title="Home utilities" action={<StateBadge>Planned</StateBadge>} /><div className="utility-list">{[["WP", "Water pressure", "Sensor not installed"], ["HW", "Hot water", "Temperature monitor planned"], ["LK", "Leak protection", "Valve controller planned"], ["PW", "Power", "Energy monitoring planned"]].map(([code, name, detail]) => <div className="utility-item" key={code}><span>{code}</span><div><strong>{name}</strong><small>{detail}</small></div><i /></div>)}</div></Panel>
-        <Panel><PanelHeading eyebrow="System log" title="Recent activity" /><div className="activity-list"><div><span className="activity-time">NOW</span><i className="activity-dot activity-dot--green" /><p><strong>Portal interface ready</strong><small>Dover Controls prototype initialized</small></p></div><div><span className="activity-time">NEXT</span><i className="activity-dot" /><p><strong>Commission Home Assistant</strong><small>Raspberry Pi setup is the next milestone</small></p></div><div><span className="activity-time">LATER</span><i className="activity-dot" /><p><strong>Connect residence systems</strong><small>Authorize UniFi, ecobee, and Kasa</small></p></div></div></Panel>
+        <Panel><PanelHeading eyebrow="System log" title="Recent activity" /><div className="activity-list"><div><span className="activity-time">NOW</span><i className="activity-dot activity-dot--green" /><p><strong>{climateLive ? "ecobee climate link active" : "Portal interface ready"}</strong><small>{climateLive ? "Live Home Assistant telemetry secured" : "Waiting for the Home Assistant bridge"}</small></p></div><div><span className="activity-time">NEXT</span><i className="activity-dot" /><p><strong>Validate two-way climate control</strong><small>Confirm one target-temperature command at the thermostat</small></p></div><div><span className="activity-time">LATER</span><i className="activity-dot" /><p><strong>Connect remaining residence systems</strong><small>UniFi Protect and compatible lighting</small></p></div></div></Panel>
       </div>
     </div>
   );
 }
 
-function DetailIntro({ code, eyebrow, title, description, badge = "Awaiting connection" }: { code: string; eyebrow: string; title: string; description: string; badge?: string }) {
-  return <Panel className="detail-intro"><div className="detail-code">{code}</div><div><span className="section-kicker">{eyebrow}</span><h2>{title}</h2><p>{description}</p></div><StateBadge>{badge}</StateBadge></Panel>;
+function DetailIntro({ code, eyebrow, title, description, badge = "Awaiting connection", badgeTone = "pending" }: { code: string; eyebrow: string; title: string; description: string; badge?: string; badgeTone?: "ready" | "pending" | "sample" }) {
+  return <Panel className="detail-intro"><div className="detail-code">{code}</div><div><span className="section-kicker">{eyebrow}</span><h2>{title}</h2><p>{description}</p></div><StateBadge tone={badgeTone}>{badge}</StateBadge></Panel>;
 }
 
 function SecurityView({ state, onArm }: { state: DemoState; onArm: () => void }) {
   return <div className="dashboard-content"><DetailIntro code="SC" eyebrow="Security domain" title="Property protection" description="One view for access, occupancy, perimeter monitoring, and future alarm controls." /><div className="detail-grid detail-grid--wide"><Panel><PanelHeading eyebrow="Preview mode" title="Security posture" action={<StateBadge tone="sample">Simulation</StateBadge>} /><div className="security-posture"><div className={`shield-visual ${state.securityMode === "Armed" ? "shield-visual--armed" : ""}`}><span>{state.securityMode === "Armed" ? "ARMED" : "STANDBY"}</span></div><div><span className="section-kicker">Current preview state</span><strong>{state.securityMode}</strong><p>No door, window, motion, or alarm entities have been commissioned.</p><button className="primary-button primary-button--compact" type="button" onClick={onArm}>{state.securityMode === "Armed" ? "Return to standby" : "Preview away arming"}</button></div></div></Panel><Panel><PanelHeading eyebrow="Planned zones" title="Sensor matrix" /><div className="zone-list">{[["Entry points", "Door and window contacts"], ["Interior", "Occupancy and motion"], ["Perimeter", "Exterior camera events"], ["Life safety", "Smoke, CO, and water"]].map(([name, detail], index) => <div className="zone-row" key={name}><span>0{index + 1}</span><div><strong>{name}</strong><small>{detail}</small></div><StateBadge>Planned</StateBadge></div>)}</div></Panel></div></div>;
 }
 
-function ClimateView({ state, onTemperature }: { state: DemoState; onTemperature: (value: number) => void }) {
-  return <div className="dashboard-content"><DetailIntro code="CL" eyebrow="Climate domain" title="Whole-home comfort" description="Thermostat, room sensors, schedules, humidity, and HVAC status will live here." badge="ecobee pending" /><div className="detail-grid detail-grid--wide"><Panel className="thermostat-panel"><PanelHeading eyebrow="Thermostat preview" title="Main floor" action={<StateBadge tone="sample">Sample data</StateBadge>} /><div className="thermostat"><div className="temperature-ring"><div><small>Indoor</small><strong>72<span>°</span></strong><em>48% humidity</em></div></div><div className="temperature-controls"><span className="section-kicker">Comfort target</span><div><button type="button" aria-label="Lower target temperature" onClick={() => onTemperature(state.targetTemperature - 1)}>−</button><strong>{state.targetTemperature}°</strong><button type="button" aria-label="Raise target temperature" onClick={() => onTemperature(state.targetTemperature + 1)}>+</button></div><p>HVAC mode <strong>Idle</strong></p><small>Updates affect this preview only.</small></div></div></Panel><Panel><PanelHeading eyebrow="Room sensors" title="Comfort zones" /><div className="room-list">{[["Main floor", "72°", "48%"], ["Primary bedroom", "—", "—"], ["Lower level", "—", "—"]].map(([name, temp, humidity], index) => <div className="room-row" key={name}><span>0{index + 1}</span><strong>{name}</strong><div><b>{temp}</b><small>{humidity} RH</small></div></div>)}</div><div className="device-note"><StatusDot tone="amber" /><p><strong>ecobee awaiting connection</strong><span>Live temperature and HVAC controls will replace sample values.</span></p></div></Panel></div></div>;
+function ClimateView({ climate, connection, busy, onTemperature }: { climate: ClimateSnapshot | null; connection: HomeAssistantConnection; busy: boolean; onTemperature: (value: number) => void }) {
+  const live = connection === "connected" && climate?.available === true;
+  const target = live ? climate.targetTemperature : null;
+  const current = live ? climate.currentTemperature : null;
+  const humidity = live ? climate.humidity : null;
+  const controlsDisabled = !live || target === null || busy;
+  const mode = live ? formatSystemState(climate.hvacMode) : "Unavailable";
+  const action = live ? formatSystemState(climate.hvacAction) : "No live state";
+
+  return (
+    <div className="dashboard-content">
+      <DetailIntro code="CL" eyebrow="Climate domain" title="Whole-home comfort" description="Live ecobee temperature, humidity, operating state, and target control through Home Assistant." badge={live ? "ecobee live" : connection === "checking" ? "Connecting" : "Bridge unavailable"} badgeTone={live ? "ready" : "pending"} />
+      <div className="detail-grid detail-grid--wide">
+        <Panel className="thermostat-panel">
+          <PanelHeading eyebrow="Home Assistant climate" title={climate?.name ?? "Dover House"} action={<StateBadge tone={live ? "ready" : "pending"}>{live ? "Live data" : "Unavailable"}</StateBadge>} />
+          <div className="thermostat">
+            <div className="temperature-ring"><div><small>Indoor</small><strong>{roundedTemperature(current)}<span>°</span></strong><em>{humidity === null ? "— humidity" : `${Math.round(humidity)}% humidity`}</em></div></div>
+            <div className="temperature-controls">
+              <span className="section-kicker">Comfort target</span>
+              <div><button type="button" aria-label="Lower target temperature" disabled={controlsDisabled} onClick={() => { if (target !== null) onTemperature(Math.round(target) - 1); }}>−</button><strong>{roundedTemperature(target)}°</strong><button type="button" aria-label="Raise target temperature" disabled={controlsDisabled} onClick={() => { if (target !== null) onTemperature(Math.round(target) + 1); }}>+</button></div>
+              <p>HVAC mode <strong>{mode}</strong></p>
+              <small>{busy ? "Sending command…" : live ? `Current action: ${action}` : "No command was sent."}</small>
+            </div>
+          </div>
+        </Panel>
+        <Panel>
+          <PanelHeading eyebrow="Room sensors" title="Comfort zones" />
+          <div className="room-list">{[["Living room", `${roundedTemperature(current)}°`, humidity === null ? "—" : `${Math.round(humidity)}%`], ["Primary bedroom", "—", "—"], ["Lower level", "—", "—"]].map(([name, temp, roomHumidity], index) => <div className="room-row" key={name}><span>0{index + 1}</span><strong>{name}</strong><div><b>{temp}</b><small>{roomHumidity} RH</small></div></div>)}</div>
+          <div className="device-note"><StatusDot tone={live ? "green" : "amber"} /><p><strong>{live ? "ecobee connected locally" : "ecobee link unavailable"}</strong><span>{live ? "State is refreshed every 15 seconds through the protected server bridge." : "Controls are disabled until a verified live state returns."}</span></p></div>
+        </Panel>
+      </div>
+    </div>
+  );
 }
 
 function LightingView({ state, onToggle, onScene }: { state: DemoState; onToggle: (id: LightId) => void; onScene: (scene: DemoState["scene"]) => void }) {
@@ -428,15 +544,18 @@ function UtilitiesView() {
   return <div className="dashboard-content"><DetailIntro code="UT" eyebrow="Utility domain" title="Infrastructure monitoring" description="A future home for water, hot water, leak protection, power, and environmental telemetry." badge="Future expansion" /><div className="utility-card-grid">{[["WP", "Water pressure", "PSI", "Track supply pressure and abnormal drops."], ["HW", "Hot water", "°F", "Monitor tank temperature and recovery."], ["LK", "Leak protection", "STATE", "Detect water and command a shutoff valve."], ["PW", "Energy", "kW", "Measure whole-home and circuit consumption."]].map(([code, name, unit, detail]) => <Panel className="utility-detail-card" key={code}><span className="utility-code">{code}</span><StateBadge>Sensor planned</StateBadge><strong>{name}</strong><div className="utility-placeholder">— <small>{unit}</small></div><p>{detail}</p></Panel>)}</div></div>;
 }
 
-function ConnectionsView() {
+function ConnectionsView({ connection, climate }: { connection: HomeAssistantConnection; climate: ClimateSnapshot | null }) {
+  const homeAssistantReady = connection === "connected";
+  const climateReady = homeAssistantReady && climate?.available === true;
   const systems = [
     { code: "DC", name: "Dover portal", badge: "Ready", ready: true, detail: "The interface shell, private preview access, responsive layout, and simulated controls are online.", foot: "Interface layer · Complete" },
-    { code: "HA", name: "Home Assistant", badge: "Not connected", detail: "The Raspberry Pi will become the local control and automation core for this dashboard.", foot: "Local core · Awaiting hardware" },
-    { code: "UI", name: "UniFi", badge: "Awaiting HA", detail: "Network health, client presence, gateway, switching, wireless, and supported controls.", foot: "Network integration · Queued" },
-    { code: "EC", name: "ecobee", badge: "Awaiting HA", detail: "Temperatures, humidity, HVAC mode, comfort settings, and thermostat controls.", foot: "Climate integration · Queued" },
-    { code: "KS", name: "Kasa", badge: "Awaiting HA", detail: "Local switching, lighting states, dimming, and energy data on supported devices.", foot: "Lighting integration · Queued" },
+    { code: "HA", name: "Home Assistant", badge: homeAssistantReady ? "Ready" : connection === "checking" ? "Connecting" : "Unavailable", ready: homeAssistantReady, detail: "Authenticated server bridge to the Home Assistant control core through Home Assistant Cloud.", foot: homeAssistantReady ? "Control core · Live" : "Control core · Check required" },
+    { code: "UI", name: "UniFi", badge: "Queued", ready: false, detail: "Network health, client presence, gateway, switching, wireless, and supported controls.", foot: "Network integration · Next phase" },
+    { code: "EC", name: "ecobee", badge: climateReady ? "Live" : "Pending", ready: climateReady, detail: "Live temperature, humidity, HVAC state, and thermostat target controls from the Living Room.", foot: climateReady ? "Climate integration · Live" : "Climate integration · Check required" },
+    { code: "KS", name: "Kasa", badge: "Deferred", ready: false, detail: "The KP115 firmware currently blocks the local Home Assistant integration; no lighting command is enabled here.", foot: "Lighting integration · Firmware blocked" },
   ];
-  return <div className="dashboard-content"><DetailIntro code="CN" eyebrow="Connection center" title="Systems and integrations" description="This is the commissioning plan for the local Home Assistant core and every connected platform." badge="1 of 5 ready" /><div className="connection-card-grid">{systems.map((system) => <Panel className={`connection-detail ${system.ready ? "connection-detail--ready" : ""}`} key={system.code}><div className="connection-detail__head"><div className={`connection-icon ${system.ready ? "connection-icon--ready" : ""}`}>{system.code}</div><StateBadge tone={system.ready ? "ready" : "pending"}>{system.badge}</StateBadge></div><h3>{system.name}</h3><p>{system.detail}</p><div className="progress-line"><i style={{ width: system.ready ? "100%" : "0%" }} /></div><small>{system.foot}</small></Panel>)}</div><Panel className="commission-panel"><div><span className="section-kicker">Next milestone</span><h3>Commission the local control core</h3><p>Once Home Assistant OS is running, we can replace the mock provider with live entities while keeping this interface intact.</p></div><span className="commission-number">01</span></Panel></div>;
+  const readyCount = systems.filter((system) => system.ready).length;
+  return <div className="dashboard-content"><DetailIntro code="CN" eyebrow="Connection center" title="Systems and integrations" description="Live integrations are isolated behind an authenticated server bridge; uncommissioned systems remain visibly simulated or disabled." badge={`${readyCount} of ${systems.length} ready`} badgeTone={climateReady ? "ready" : "pending"} /><div className="connection-card-grid">{systems.map((system) => <Panel className={`connection-detail ${system.ready ? "connection-detail--ready" : ""}`} key={system.code}><div className="connection-detail__head"><div className={`connection-icon ${system.ready ? "connection-icon--ready" : ""}`}>{system.code}</div><StateBadge tone={system.ready ? "ready" : "pending"}>{system.badge}</StateBadge></div><h3>{system.name}</h3><p>{system.detail}</p><div className="progress-line"><i style={{ width: system.ready ? "100%" : "0%" }} /></div><small>{system.foot}</small></Panel>)}</div><Panel className="commission-panel"><div><span className="section-kicker">Next milestone</span><h3>{climateReady ? "Validate live climate control" : "Verify the Home Assistant bridge"}</h3><p>{climateReady ? "Send one small target-temperature change, confirm it at the ecobee, and then restore the original setting." : "Confirm the protected bridge credentials and exact climate entity before enabling a physical command."}</p></div><span className="commission-number">{climateReady ? "02" : "01"}</span></Panel></div>;
 }
 
 function AccountSettingsView({ email, busyAction, onPasswordReset, onSignOut }: { email: string | null; busyAction: AccountAction | null; onPasswordReset: () => void; onSignOut: () => void }) {
@@ -526,6 +645,9 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
   const [toast, setToast] = useState("");
   const [demoState, setDemoState] = useState<DemoState>(initialDemoState);
   const [accountAction, setAccountAction] = useState<AccountAction | null>(null);
+  const [homeAssistantConnection, setHomeAssistantConnection] = useState<HomeAssistantConnection>("checking");
+  const [climate, setClimate] = useState<ClimateSnapshot | null>(null);
+  const [climateBusy, setClimateBusy] = useState(false);
   const { displayName, initials } = useMemo(() => getOperatorIdentity(user), [user]);
 
   useEffect(() => {
@@ -542,6 +664,27 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
   useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(demoState)); } catch { /* optional */ } }, [demoState]);
 
+  const refreshClimate = useCallback(async () => {
+    try {
+      const snapshot = await climateRequest(user);
+      setClimate(snapshot);
+      setHomeAssistantConnection("connected");
+      return snapshot;
+    } catch {
+      setHomeAssistantConnection("unavailable");
+      return null;
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void refreshClimate(), 0);
+    const timer = window.setInterval(() => void refreshClimate(), 15_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [refreshClimate]);
+
   function notify(message: string) { setToast(message); window.setTimeout(() => setToast(""), 3200); }
   function applyState(next: DemoState, message: string) { setDemoState(next); notify(`${message} — no physical device was changed.`); }
   function selectScene(scene: DemoState["scene"]) {
@@ -554,7 +697,35 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
     applyState({ ...demoState, scene, ...configurations[scene] }, `${scene} scene preview updated`);
   }
   function toggleLight(id: LightId) { const lights = { ...demoState.lights, [id]: !demoState.lights[id] }; applyState({ ...demoState, lights }, `${lightLabels[id]} ${lights[id] ? "turned on" : "turned off"}`); }
-  function setTemperature(value: number) { const bounded = Math.min(80, Math.max(60, value)); applyState({ ...demoState, targetTemperature: bounded }, `Climate target set to ${bounded}°`); }
+  async function setTemperature(value: number) {
+    if (!climate?.available || climate.targetTemperature === null || climateBusy) {
+      notify("Live climate control is unavailable. No command was sent.");
+      return;
+    }
+
+    const lowerBound = Math.max(60, climate.minTemperature);
+    const upperBound = Math.min(80, climate.maxTemperature);
+    const bounded = Math.min(upperBound, Math.max(lowerBound, Math.round(value)));
+    const previous = climate;
+    setClimateBusy(true);
+    setClimate({ ...climate, targetTemperature: bounded });
+
+    try {
+      const snapshot = await climateRequest(user, {
+        method: "PATCH",
+        body: JSON.stringify({ temperature: bounded }),
+      });
+      setClimate(snapshot);
+      setHomeAssistantConnection("connected");
+      notify(`Climate target set to ${bounded}° through Home Assistant.`);
+    } catch {
+      setClimate(previous);
+      notify("The thermostat did not confirm the change. The previous target was restored on screen.");
+      void refreshClimate();
+    } finally {
+      setClimateBusy(false);
+    }
+  }
   function toggleSecurity() { const securityMode = demoState.securityMode === "Armed" ? "Standby" : "Armed"; applyState({ ...demoState, securityMode }, `Security preview set to ${securityMode}`); }
   async function requestPasswordReset() {
     if (!user.email) {
@@ -591,14 +762,14 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
   switch (activeView) {
     case "mission": content = <MissionControlView />; break;
     case "security": content = <SecurityView state={demoState} onArm={toggleSecurity} />; break;
-    case "climate": content = <ClimateView state={demoState} onTemperature={setTemperature} />; break;
+    case "climate": content = <ClimateView climate={climate} connection={homeAssistantConnection} busy={climateBusy} onTemperature={(value) => void setTemperature(value)} />; break;
     case "lighting": content = <LightingView state={demoState} onToggle={toggleLight} onScene={selectScene} />; break;
     case "network": content = <NetworkView />; break;
     case "cameras": content = <CamerasView />; break;
     case "utilities": content = <UtilitiesView />; break;
-    case "connections": content = <ConnectionsView />; break;
+    case "connections": content = <ConnectionsView connection={homeAssistantConnection} climate={climate} />; break;
     case "settings": content = <AccountSettingsView email={user.email} busyAction={accountAction} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} />; break;
-    default: content = <Overview state={demoState} onScene={selectScene} onNavigate={setActiveView} />;
+    default: content = <Overview state={demoState} climate={climate} connection={homeAssistantConnection} onScene={selectScene} onNavigate={setActiveView} />;
   }
   const activeLabel = activeView === "settings" ? "Account settings" : navItems.find((item) => item.id === activeView)?.label ?? "Overview";
 
@@ -607,12 +778,12 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
       <aside className="sidebar">
         <div className="sidebar-brand"><BrandMark compact /></div>
         <nav className="desktop-nav" aria-label="Dashboard sections"><span className="nav-heading">Command domains</span>{navItems.map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span>{item.label}{activeView === item.id && <i />}</button>)}</nav>
-        <div className="sidebar-status"><span className="nav-heading">System status</span><div><StatusDot tone="green" /><p><strong>Portal ready</strong><small>Simulation mode</small></p></div><div><StatusDot tone="amber" /><p><strong>HA disconnected</strong><small>Awaiting local core</small></p></div></div>
+        <div className="sidebar-status"><span className="nav-heading">System status</span><div><StatusDot tone="green" /><p><strong>Portal ready</strong><small>Authenticated control UI</small></p></div><div><StatusDot tone={homeAssistantConnection === "connected" ? "green" : "amber"} /><p><strong>{homeAssistantConnection === "connected" ? "HA connected" : homeAssistantConnection === "checking" ? "HA connecting" : "HA unavailable"}</strong><small>{homeAssistantConnection === "connected" && climate?.available ? "ecobee climate live" : "Climate controls disabled"}</small></p></div></div>
         <button className="profile-card" type="button" onClick={() => setActiveView("settings")} aria-label={`Open account settings for ${user.email ?? displayName}`} title={user.email ?? "Signed-in account"}><span className="avatar">{initials}</span><span><strong>{displayName}</strong><small>Account settings</small></span><i>›</i></button>
       </aside>
       <section className="dashboard-main">
         <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, {displayName}.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><AccountControl displayName={displayName} email={user.email} initials={initials} busyAction={accountAction} onOpenSettings={() => setActiveView("settings")} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} /></div></header>
-        <div className="simulation-banner" role="status"><div><StatusDot tone="amber" /><strong>Simulation mode</strong><span>Home Assistant is not connected. Controls update this preview only.</span></div><StateBadge tone="sample">No active alerts</StateBadge></div>
+        <div className="simulation-banner" role="status"><div><StatusDot tone={homeAssistantConnection === "connected" ? "green" : "amber"} /><strong>{homeAssistantConnection === "connected" ? "Partial live mode" : homeAssistantConnection === "checking" ? "Connecting securely" : "Bridge unavailable"}</strong><span>{homeAssistantConnection === "connected" ? "The ecobee is live. Security, lighting, scenes, and cameras remain simulation-only." : "Physical climate controls remain disabled until Home Assistant responds."}</span></div><StateBadge tone={homeAssistantConnection === "connected" && climate?.available ? "ready" : "pending"}>{homeAssistantConnection === "connected" && climate?.available ? "Climate online" : "No physical commands"}</StateBadge></div>
         {content}
       </section>
       <nav className="mobile-nav" aria-label="Mobile dashboard sections">{navItems.slice(0, 5).map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span><small>{item.label}</small></button>)}</nav>
