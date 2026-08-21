@@ -20,6 +20,20 @@ const responseHeaders = {
   "X-Content-Type-Options": "nosniff",
 };
 
+// Temporary distinct statuses make sanitized bridge failures visible in
+// provider access logs when function stdout is unavailable.
+const bridgeDiagnosticStatus: Record<string, number> = {
+  bridge_not_configured: 550,
+  home_assistant_unreachable: 551,
+  home_assistant_authorization_failed: 552,
+  home_assistant_unavailable: 553,
+  invalid_home_assistant_response: 554,
+  invalid_climate_configuration: 555,
+  climate_entity_not_found: 556,
+  climate_command_failed: 557,
+  climate_command_unconfirmed: 558,
+};
+
 const mutationWindows = new Map<string, number[]>();
 
 function mutationAllowed(operatorId: string): boolean {
@@ -49,7 +63,10 @@ function errorResponse(error: unknown): Response {
       code: error.code,
       status: error.status,
     });
-    return json({ error: error.code }, error.status);
+    return json(
+      { error: error.code },
+      bridgeDiagnosticStatus[error.code] ?? error.status,
+    );
   }
 
   console.error("[home-assistant-climate] unexpected bridge error");
