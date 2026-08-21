@@ -116,7 +116,7 @@ function effectiveRole(user: { email: string; role: OperatorRole | null }): Oper
 export async function GET(request: Request): Promise<Response> {
   try {
     await verifyOwner(request);
-    const users = (await listFirebaseUsers())
+    const users = (await listFirebaseUsers(request))
       .flatMap((user) => {
         const role = effectiveRole(user);
         return role ? [toOperatorUser(user, role)] : [];
@@ -169,7 +169,7 @@ export async function POST(request: Request): Promise<Response> {
       displayName: input.displayName,
       password: input.temporaryPassword,
       role: input.role,
-    });
+    }, request);
     return json({ user: toOperatorUser(user, input.role) }, 201);
   } catch (error) {
     return errorResponse(error);
