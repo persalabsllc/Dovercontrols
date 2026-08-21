@@ -129,10 +129,10 @@ async function lookupAccount(token: string): Promise<FirebaseAccount> {
   return account;
 }
 
-async function bootstrapOwnerClaim(account: FirebaseAccount): Promise<void> {
+async function bootstrapOwnerClaim(account: FirebaseAccount, request: Request): Promise<void> {
   if (!account.localId) return;
   try {
-    await updateFirebaseUser(account.localId, { role: "owner" });
+    await updateFirebaseUser(account.localId, { role: "owner" }, request);
   } catch {
     // The configured bootstrap owner remains usable while the service account is commissioned.
     // A future request will retry seeding the persistent custom claim.
@@ -162,7 +162,7 @@ export async function verifyAuthenticatedOperator(request: Request): Promise<Ver
 
   if (email === bootstrapOwnerEmail) {
     role = "owner";
-    if (claimedRole !== "owner") await bootstrapOwnerClaim(account);
+    if (claimedRole !== "owner") await bootstrapOwnerClaim(account, request);
   } else if (claimedRole === "owner") {
     // Only the explicitly configured bootstrap identity may hold the owner role.
     throw new OperatorAuthorizationError(403, "operator_not_authorized");
