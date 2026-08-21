@@ -20,7 +20,14 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
+import { UserManagementView } from "@/components/UserManagementView";
+import type {
+  ClimateCommand,
+  ClimateCommandResult,
+  ClimateSnapshot,
+} from "@/lib/climate-types";
 import { getFirebaseAuth } from "@/lib/firebase";
+import type { OperatorSession } from "@/lib/operator-types";
 
 type View =
   | "overview"
@@ -32,6 +39,7 @@ type View =
   | "cameras"
   | "utilities"
   | "connections"
+  | "users"
   | "settings";
 
 type LightId = "living" | "kitchen" | "bedroom" | "exterior";
@@ -43,22 +51,6 @@ type DemoState = {
 };
 
 type HomeAssistantConnection = "checking" | "connected" | "unavailable";
-
-type ClimateSnapshot = {
-  available: boolean;
-  name: string;
-  currentTemperature: number | null;
-  targetTemperature: number | null;
-  humidity: number | null;
-  hvacMode: string;
-  hvacAction: string | null;
-  fanMode: string | null;
-  presetMode: string | null;
-  temperatureUnit: string;
-  minTemperature: number;
-  maxTemperature: number;
-  updatedAt: string | null;
-};
 
 const STORAGE_KEY = "dover-controls-preview-v1";
 
@@ -163,6 +155,10 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 function isClimateSnapshot(value: unknown): value is ClimateSnapshot {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<ClimateSnapshot>;
@@ -171,22 +167,68 @@ function isClimateSnapshot(value: unknown): value is ClimateSnapshot {
     typeof candidate.name === "string" &&
     isNullableNumber(candidate.currentTemperature) &&
     isNullableNumber(candidate.targetTemperature) &&
+    isNullableNumber(candidate.targetTemperatureLow) &&
+    isNullableNumber(candidate.targetTemperatureHigh) &&
     isNullableNumber(candidate.humidity) &&
     typeof candidate.hvacMode === "string" &&
+    isStringArray(candidate.hvacModes) &&
     isNullableString(candidate.hvacAction) &&
     isNullableString(candidate.fanMode) &&
+    isStringArray(candidate.fanModes) &&
     isNullableString(candidate.presetMode) &&
+    isStringArray(candidate.presetModes) &&
+    isNullableString(candidate.scheduleMode) &&
+    isStringArray(candidate.scheduleModes) &&
     typeof candidate.temperatureUnit === "string" &&
+    typeof candidate.temperatureStep === "number" &&
     typeof candidate.minTemperature === "number" &&
     typeof candidate.maxTemperature === "number" &&
+    !!candidate.capabilities &&
+    typeof candidate.capabilities === "object" &&
+    typeof candidate.capabilities.setTemperature === "boolean" &&
+    typeof candidate.capabilities.setTemperatureRange === "boolean" &&
+    typeof candidate.capabilities.setHvacMode === "boolean" &&
+    typeof candidate.capabilities.setFanMode === "boolean" &&
+    typeof candidate.capabilities.setPresetMode === "boolean" &&
+    typeof candidate.capabilities.setScheduleMode === "boolean" &&
+    typeof candidate.capabilities.clearHold === "boolean" &&
     isNullableString(candidate.updatedAt)
   );
 }
 
-async function climateRequest(
+function isClimateCommandResult(value: unknown): value is ClimateCommandResult {
+  if (!isClimateSnapshot(value)) return false;
+  const command = (value as Partial<ClimateCommandResult>).command;
+  return (
+    !!command &&
+    typeof command === "object" &&
+    [
+      "set_temperature",
+      "set_hvac_mode",
+      "set_fan_mode",
+      "set_preset_mode",
+      "set_schedule_mode",
+      "clear_hold",
+    ].includes(command.action) &&
+    (command.status === "confirmed" || command.status === "accepted")
+  );
+}
+
+function isOperatorSession(value: unknown): value is OperatorSession {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<OperatorSession>;
+  return (
+    typeof candidate.uid === "string" &&
+    typeof candidate.email === "string" &&
+    isNullableString(candidate.displayName) &&
+    (candidate.role === "owner" || candidate.role === "operator" || candidate.role === "viewer")
+  );
+}
+
+async function climateApiResponse(
   user: User,
   init: RequestInit = {},
-): Promise<ClimateSnapshot> {
+): Promise<Response> {
   async function execute(forceRefresh: boolean): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await user.getIdToken(forceRefresh)}`);
@@ -202,14 +244,65 @@ async function climateRequest(
   let response = await execute(false);
   if (response.status === 401) response = await execute(true);
   if (!response.ok) throw new Error("Home Assistant bridge request failed");
+  return response;
+}
 
+async function climateRequest(user: User): Promise<ClimateSnapshot> {
+  const response = await climateApiResponse(user);
   const payload = (await response.json()) as unknown;
   if (!isClimateSnapshot(payload)) throw new Error("Home Assistant bridge returned invalid data");
   return payload;
 }
 
-function roundedTemperature(value: number | null): string {
-  return value === null ? "—" : String(Math.round(value));
+async function climateCommandRequest(
+  user: User,
+  command: ClimateCommand,
+): Promise<ClimateCommandResult> {
+  const response = await climateApiResponse(user, {
+    method: "PATCH",
+    body: JSON.stringify(command),
+  });
+  const payload = (await response.json()) as unknown;
+  if (!isClimateCommandResult(payload)) {
+    throw new Error("Home Assistant bridge returned an invalid command result");
+  }
+  return payload;
+}
+
+class SessionAuthorizationError extends Error {
+  constructor(public readonly status: number) {
+    super("session_authorization_failed");
+    this.name = "SessionAuthorizationError";
+  }
+}
+
+async function operatorSessionRequest(user: User): Promise<OperatorSession> {
+  async function execute(forceRefresh: boolean): Promise<Response> {
+    return fetch("/api/operator/me", {
+      headers: { Authorization: `Bearer ${await user.getIdToken(forceRefresh)}` },
+      cache: "no-store",
+    });
+  }
+
+  let response = await execute(false);
+  if (response.status === 401) response = await execute(true);
+  if (!response.ok) throw new SessionAuthorizationError(response.status);
+
+  const payload = (await response.json()) as { user?: unknown };
+  if (!isOperatorSession(payload.user)) throw new SessionAuthorizationError(503);
+  return payload.user;
+}
+
+function temperaturePrecision(step: number): number {
+  const safeStep = Number.isFinite(step) && step > 0 ? step : 1;
+  const normalized = safeStep.toFixed(4).replace(/0+$/, "");
+  const decimalIndex = normalized.indexOf(".");
+  return decimalIndex === -1 ? 0 : normalized.length - decimalIndex - 1;
+}
+
+function roundedTemperature(value: number | null, step = 1): string {
+  if (value === null) return "—";
+  return String(Number(value.toFixed(temperaturePrecision(step))));
 }
 
 function formatSystemState(value: string | null): string {
@@ -381,8 +474,22 @@ function QuickScenes({ current, onSelect }: { current: DemoState["scene"]; onSel
 function Overview({ state, climate, connection, onScene, onNavigate }: { state: DemoState; climate: ClimateSnapshot | null; connection: HomeAssistantConnection; onScene: (scene: DemoState["scene"]) => void; onNavigate: (view: View) => void }) {
   const lightsOn = Object.values(state.lights).filter(Boolean).length;
   const climateLive = connection === "connected" && climate?.available === true;
-  const currentTemperature = roundedTemperature(climateLive ? climate.currentTemperature : null);
-  const targetTemperature = roundedTemperature(climateLive ? climate.targetTemperature : null);
+  const temperatureStep = climate?.temperatureStep ?? 1;
+  const temperatureUnit = climate?.temperatureUnit ?? "°F";
+  const currentTemperature = roundedTemperature(
+    climateLive ? climate.currentTemperature : null,
+    temperatureStep,
+  );
+  const targetTemperature = roundedTemperature(
+    climateLive ? climate.targetTemperature : null,
+    temperatureStep,
+  );
+  const targetSummary = climateLive &&
+    climate.hvacMode === "heat_cool" &&
+    climate.targetTemperatureLow !== null &&
+    climate.targetTemperatureHigh !== null
+    ? `${roundedTemperature(climate.targetTemperatureLow, temperatureStep)}${temperatureUnit}–${roundedTemperature(climate.targetTemperatureHigh, temperatureStep)}${temperatureUnit}`
+    : targetTemperature === "—" ? "—" : `${targetTemperature}${temperatureUnit}`;
   const humidity = climateLive && climate.humidity !== null ? `${Math.round(climate.humidity)}%` : "—";
   return (
     <div className="dashboard-content">
@@ -397,7 +504,7 @@ function Overview({ state, climate, connection, onScene, onNavigate }: { state: 
 
       <div className="metric-grid">
         <button className="metric-card" type="button" onClick={() => onNavigate("security")}><span className="metric-top"><span className="metric-code">SC</span><StateBadge>Awaiting</StateBadge></span><strong>Security</strong><span className="metric-value">Standby</span><small>Sensors not commissioned</small><i className="metric-line" /></button>
-        <button className="metric-card" type="button" onClick={() => onNavigate("climate")}><span className="metric-top"><span className="metric-code">CL</span><StateBadge tone={climateLive ? "ready" : "pending"}>{climateLive ? "Live" : connection === "checking" ? "Connecting" : "Unavailable"}</StateBadge></span><strong>Climate</strong><span className="metric-value">{currentTemperature}<span>°</span></span><small>Target {targetTemperature}° · Humidity {humidity}</small><i className="metric-line metric-line--cyan" /></button>
+        <button className="metric-card" type="button" onClick={() => onNavigate("climate")}><span className="metric-top"><span className="metric-code">CL</span><StateBadge tone={climateLive ? "ready" : "pending"}>{climateLive ? "Live" : connection === "checking" ? "Connecting" : "Unavailable"}</StateBadge></span><strong>Climate</strong><span className="metric-value">{currentTemperature}<span>{temperatureUnit}</span></span><small>Target {targetSummary} · Humidity {humidity}</small><i className="metric-line metric-line--cyan" /></button>
         <button className="metric-card" type="button" onClick={() => onNavigate("lighting")}><span className="metric-top"><span className="metric-code">LT</span><StateBadge tone="sample">Interactive</StateBadge></span><strong>Lighting</strong><span className="metric-value">{lightsOn}<span>/4</span></span><small>Demo circuits active</small><i className="metric-line metric-line--green" /></button>
         <button className="metric-card" type="button" onClick={() => onNavigate("network")}><span className="metric-top"><span className="metric-code">NW</span><StateBadge>Awaiting</StateBadge></span><strong>Network</strong><span className="metric-value metric-value--word">UniFi</span><small>Controller connection pending</small><i className="metric-line" /></button>
       </div>
@@ -423,14 +530,63 @@ function SecurityView({ state, onArm }: { state: DemoState; onArm: () => void })
   return <div className="dashboard-content"><DetailIntro code="SC" eyebrow="Security domain" title="Property protection" description="One view for access, occupancy, perimeter monitoring, and future alarm controls." /><div className="detail-grid detail-grid--wide"><Panel><PanelHeading eyebrow="Preview mode" title="Security posture" action={<StateBadge tone="sample">Simulation</StateBadge>} /><div className="security-posture"><div className={`shield-visual ${state.securityMode === "Armed" ? "shield-visual--armed" : ""}`}><span>{state.securityMode === "Armed" ? "ARMED" : "STANDBY"}</span></div><div><span className="section-kicker">Current preview state</span><strong>{state.securityMode}</strong><p>No door, window, motion, or alarm entities have been commissioned.</p><button className="primary-button primary-button--compact" type="button" onClick={onArm}>{state.securityMode === "Armed" ? "Return to standby" : "Preview away arming"}</button></div></div></Panel><Panel><PanelHeading eyebrow="Planned zones" title="Sensor matrix" /><div className="zone-list">{[["Entry points", "Door and window contacts"], ["Interior", "Occupancy and motion"], ["Perimeter", "Exterior camera events"], ["Life safety", "Smoke, CO, and water"]].map(([name, detail], index) => <div className="zone-row" key={name}><span>0{index + 1}</span><div><strong>{name}</strong><small>{detail}</small></div><StateBadge>Planned</StateBadge></div>)}</div></Panel></div></div>;
 }
 
-function ClimateView({ climate, connection, busy, onTemperature }: { climate: ClimateSnapshot | null; connection: HomeAssistantConnection; busy: boolean; onTemperature: (value: number) => void }) {
+type ClimateBusyAction = ClimateCommand["action"] | null;
+
+function climateOptionLabel(value: string): string {
+  if (value === "on") return "On (hold)";
+  if (value === "heat_cool") return "Auto heat/cool";
+  return formatSystemState(value);
+}
+
+function adjustedTemperature(value: number, direction: -1 | 1, step: number): number {
+  return Number((value + direction * step).toFixed(temperaturePrecision(step)));
+}
+
+function canAdjustTemperature(
+  value: number,
+  direction: -1 | 1,
+  step: number,
+  minimum: number,
+  maximum: number,
+): boolean {
+  const candidate = adjustedTemperature(value, direction, step);
+  return candidate >= minimum - 0.000_001 && candidate <= maximum + 0.000_001;
+}
+
+function ClimateSegmentedControl({ label, options, value, disabled, onSelect }: { label: string; options: string[]; value: string | null; disabled: boolean; onSelect: (value: string) => void }) {
+  return (
+    <fieldset className="climate-segmented-control" disabled={disabled}>
+      <legend>{label}</legend>
+      {options.length > 0 ? (
+        <div className="climate-segments">
+          {options.map((option) => (
+            <button key={option} type="button" aria-pressed={value === option} onClick={() => onSelect(option)}>
+              {climateOptionLabel(option)}
+            </button>
+          ))}
+        </div>
+      ) : <p className="climate-capability-empty">Not exposed by Home Assistant.</p>}
+    </fieldset>
+  );
+}
+
+function ClimateView({ climate, connection, busyAction, readOnly, onCommand }: { climate: ClimateSnapshot | null; connection: HomeAssistantConnection; busyAction: ClimateBusyAction; readOnly: boolean; onCommand: (command: ClimateCommand) => void }) {
   const live = connection === "connected" && climate?.available === true;
   const target = live ? climate.targetTemperature : null;
   const current = live ? climate.currentTemperature : null;
   const humidity = live ? climate.humidity : null;
-  const controlsDisabled = !live || target === null || busy;
+  const controlsDisabled = !live || readOnly || busyAction !== null;
   const mode = live ? formatSystemState(climate.hvacMode) : "Unavailable";
   const action = live ? formatSystemState(climate.hvacAction) : "No live state";
+  const unit = climate?.temperatureUnit ?? "°F";
+  const step = Math.max(0.1, climate?.temperatureStep ?? 1);
+  const minimum = climate?.minTemperature ?? 60;
+  const maximum = climate?.maxTemperature ?? 80;
+  const rangeMode = live && climate.hvacMode === "heat_cool";
+  const hasRangeTargets = rangeMode &&
+    climate.targetTemperatureLow !== null &&
+    climate.targetTemperatureHigh !== null;
+  const rangeControlsDisabled = controlsDisabled || !climate?.capabilities.setTemperatureRange;
 
   return (
     <div className="dashboard-content">
@@ -439,21 +595,48 @@ function ClimateView({ climate, connection, busy, onTemperature }: { climate: Cl
         <Panel className="thermostat-panel">
           <PanelHeading eyebrow="Home Assistant climate" title={climate?.name ?? "Dover House"} action={<StateBadge tone={live ? "ready" : "pending"}>{live ? "Live data" : "Unavailable"}</StateBadge>} />
           <div className="thermostat">
-            <div className="temperature-ring"><div><small>Indoor</small><strong>{roundedTemperature(current)}<span>°</span></strong><em>{humidity === null ? "— humidity" : `${Math.round(humidity)}% humidity`}</em></div></div>
+            <div className="temperature-ring"><div><small>Indoor</small><strong>{roundedTemperature(current, step)}<span>{unit}</span></strong><em>{humidity === null ? "— humidity" : `${Math.round(humidity)}% humidity`}</em></div></div>
             <div className="temperature-controls">
               <span className="section-kicker">Comfort target</span>
-              <div><button type="button" aria-label="Lower target temperature" disabled={controlsDisabled} onClick={() => { if (target !== null) onTemperature(Math.round(target) - 1); }}>−</button><strong>{roundedTemperature(target)}°</strong><button type="button" aria-label="Raise target temperature" disabled={controlsDisabled} onClick={() => { if (target !== null) onTemperature(Math.round(target) + 1); }}>+</button></div>
+              {hasRangeTargets ? (
+                <div className="temperature-range-controls">
+                  <div><small>Heat to</small><span><button type="button" aria-label="Lower heating target" disabled={rangeControlsDisabled || !canAdjustTemperature(climate.targetTemperatureLow!, -1, step, minimum, climate.targetTemperatureHigh!)} onClick={() => onCommand({ action: "set_temperature", targetLow: adjustedTemperature(climate.targetTemperatureLow!, -1, step), targetHigh: climate.targetTemperatureHigh! })}>−</button><strong>{roundedTemperature(climate.targetTemperatureLow, step)}{unit}</strong><button type="button" aria-label="Raise heating target" disabled={rangeControlsDisabled || !canAdjustTemperature(climate.targetTemperatureLow!, 1, step, minimum, climate.targetTemperatureHigh!)} onClick={() => onCommand({ action: "set_temperature", targetLow: adjustedTemperature(climate.targetTemperatureLow!, 1, step), targetHigh: climate.targetTemperatureHigh! })}>+</button></span></div>
+                  <div><small>Cool to</small><span><button type="button" aria-label="Lower cooling target" disabled={rangeControlsDisabled || !canAdjustTemperature(climate.targetTemperatureHigh!, -1, step, climate.targetTemperatureLow!, maximum)} onClick={() => onCommand({ action: "set_temperature", targetLow: climate.targetTemperatureLow!, targetHigh: adjustedTemperature(climate.targetTemperatureHigh!, -1, step) })}>−</button><strong>{roundedTemperature(climate.targetTemperatureHigh, step)}{unit}</strong><button type="button" aria-label="Raise cooling target" disabled={rangeControlsDisabled || !canAdjustTemperature(climate.targetTemperatureHigh!, 1, step, climate.targetTemperatureLow!, maximum)} onClick={() => onCommand({ action: "set_temperature", targetLow: climate.targetTemperatureLow!, targetHigh: adjustedTemperature(climate.targetTemperatureHigh!, 1, step) })}>+</button></span></div>
+                </div>
+              ) : rangeMode ? (
+                <p className="climate-capability-empty">Waiting for Home Assistant to report both automatic heat and cool targets.</p>
+              ) : (
+                <div><button type="button" aria-label="Lower target temperature" disabled={controlsDisabled || target === null || !climate?.capabilities.setTemperature || !canAdjustTemperature(target, -1, step, minimum, maximum)} onClick={() => { if (target !== null) onCommand({ action: "set_temperature", temperature: adjustedTemperature(target, -1, step) }); }}>−</button><strong>{roundedTemperature(target, step)}{unit}</strong><button type="button" aria-label="Raise target temperature" disabled={controlsDisabled || target === null || !climate?.capabilities.setTemperature || !canAdjustTemperature(target, 1, step, minimum, maximum)} onClick={() => { if (target !== null) onCommand({ action: "set_temperature", temperature: adjustedTemperature(target, 1, step) }); }}>+</button></div>
+              )}
               <p>HVAC mode <strong>{mode}</strong></p>
-              <small>{busy ? "Sending command…" : live ? `Current action: ${action}` : "No command was sent."}</small>
+              <small aria-live="polite">{busyAction ? `Sending ${formatSystemState(busyAction)} command…` : readOnly ? "Viewer access — controls are read-only." : live ? `Current action: ${action}` : "No command was sent."}</small>
             </div>
           </div>
         </Panel>
         <Panel>
           <PanelHeading eyebrow="Room sensors" title="Comfort zones" />
-          <div className="room-list">{[["Living room", `${roundedTemperature(current)}°`, humidity === null ? "—" : `${Math.round(humidity)}%`], ["Primary bedroom", "—", "—"], ["Lower level", "—", "—"]].map(([name, temp, roomHumidity], index) => <div className="room-row" key={name}><span>0{index + 1}</span><strong>{name}</strong><div><b>{temp}</b><small>{roomHumidity} RH</small></div></div>)}</div>
+          <div className="room-list">{[["Living room", `${roundedTemperature(current, step)}${unit}`, humidity === null ? "—" : `${Math.round(humidity)}%`], ["Primary bedroom", "—", "—"], ["Lower level", "—", "—"]].map(([name, temp, roomHumidity], index) => <div className="room-row" key={name}><span>0{index + 1}</span><strong>{name}</strong><div><b>{temp}</b><small>{roomHumidity} RH</small></div></div>)}</div>
           <div className="device-note"><StatusDot tone={live ? "green" : "amber"} /><p><strong>{live ? "ecobee connected locally" : "ecobee link unavailable"}</strong><span>{live ? "State is refreshed every 15 seconds through the protected server bridge." : "Controls are disabled until a verified live state returns."}</span></p></div>
         </Panel>
       </div>
+      <Panel className="climate-operations-panel">
+        <PanelHeading eyebrow="Thermostat operations" title="Mode, fan, and schedule" action={<StateBadge tone={live ? "ready" : "pending"}>{readOnly ? "Read only" : busyAction ? "Command active" : live ? "Ready" : "Unavailable"}</StateBadge>} />
+        <div className="climate-operations-grid">
+          <div className="climate-control-group">
+            <ClimateSegmentedControl label="HVAC mode" options={climate?.hvacModes ?? []} value={climate?.hvacMode ?? null} disabled={controlsDisabled || !climate?.capabilities.setHvacMode} onSelect={(hvacMode) => onCommand({ action: "set_hvac_mode", hvacMode })} />
+            <p>Switch heating, cooling, automatic range, or standby using modes advertised by this ecobee.</p>
+          </div>
+          <div className="climate-control-group">
+            <ClimateSegmentedControl label="Fan mode" options={climate?.fanModes ?? []} value={climate?.fanMode ?? null} disabled={controlsDisabled || !climate?.capabilities.setFanMode} onSelect={(fanMode) => onCommand({ action: "set_fan_mode", fanMode })} />
+            <p><strong>Fan On creates an indefinite thermostat hold.</strong> Timed fan holds are not exposed by this local ecobee connection; use Resume schedule when finished.</p>
+          </div>
+          <div className="climate-control-group">
+            {climate?.scheduleModes.length ? <ClimateSegmentedControl label="Comfort mode" options={climate.scheduleModes} value={climate.scheduleMode} disabled={controlsDisabled || !climate.capabilities.setScheduleMode} onSelect={(scheduleMode) => onCommand({ action: "set_schedule_mode", scheduleMode })} /> : <ClimateSegmentedControl label="Preset" options={climate?.presetModes ?? []} value={climate?.presetMode ?? null} disabled={controlsDisabled || !climate?.capabilities.setPresetMode} onSelect={(presetMode) => onCommand({ action: "set_preset_mode", presetMode })} />}
+            <button className="climate-resume-button" type="button" disabled={controlsDisabled || !climate?.capabilities.clearHold} onClick={() => onCommand({ action: "clear_hold" })}>Resume schedule / Clear hold</button>
+            <p>Home, Sleep, and Away are temporary comfort holds. Resume returns control to the ecobee schedule.</p>
+          </div>
+        </div>
+      </Panel>
     </div>
   );
 }
@@ -558,7 +741,7 @@ function ConnectionsView({ connection, climate }: { connection: HomeAssistantCon
   return <div className="dashboard-content"><DetailIntro code="CN" eyebrow="Connection center" title="Systems and integrations" description="Live integrations are isolated behind an authenticated server bridge; uncommissioned systems remain visibly simulated or disabled." badge={`${readyCount} of ${systems.length} ready`} badgeTone={climateReady ? "ready" : "pending"} /><div className="connection-card-grid">{systems.map((system) => <Panel className={`connection-detail ${system.ready ? "connection-detail--ready" : ""}`} key={system.code}><div className="connection-detail__head"><div className={`connection-icon ${system.ready ? "connection-icon--ready" : ""}`}>{system.code}</div><StateBadge tone={system.ready ? "ready" : "pending"}>{system.badge}</StateBadge></div><h3>{system.name}</h3><p>{system.detail}</p><div className="progress-line"><i style={{ width: system.ready ? "100%" : "0%" }} /></div><small>{system.foot}</small></Panel>)}</div><Panel className="commission-panel"><div><span className="section-kicker">Next milestone</span><h3>{climateReady ? "Validate live climate control" : "Verify the Home Assistant bridge"}</h3><p>{climateReady ? "Send one small target-temperature change, confirm it at the ecobee, and then restore the original setting." : "Confirm the protected bridge credentials and exact climate entity before enabling a physical command."}</p></div><span className="commission-number">{climateReady ? "02" : "01"}</span></Panel></div>;
 }
 
-function AccountSettingsView({ email, busyAction, onPasswordReset, onSignOut }: { email: string | null; busyAction: AccountAction | null; onPasswordReset: () => void; onSignOut: () => void }) {
+function AccountSettingsView({ email, role, busyAction, onOpenUsers, onPasswordReset, onSignOut }: { email: string | null; role: OperatorSession["role"]; busyAction: AccountAction | null; onOpenUsers: () => void; onPasswordReset: () => void; onSignOut: () => void }) {
   return (
     <div className="dashboard-content">
       <DetailIntro code="ID" eyebrow="Operator account" title="Identity and access" description="Review the authenticated account, update its password securely, or terminate the current session." badge="Session active" />
@@ -568,6 +751,7 @@ function AccountSettingsView({ email, busyAction, onPasswordReset, onSignOut }: 
           <div className="account-detail-list">
             <div><span>Operator email</span><strong>{email ?? "Email unavailable"}</strong></div>
             <div><span>Authorization method</span><strong>Email and password</strong></div>
+            <div><span>Access role</span><strong>{formatSystemState(role)}</strong></div>
             <div><span>Session status</span><strong className="account-session-status"><StatusDot tone="green" /> Active</strong></div>
           </div>
         </Panel>
@@ -585,11 +769,17 @@ function AccountSettingsView({ email, busyAction, onPasswordReset, onSignOut }: 
           </div>
         </Panel>
       </div>
+      {role === "owner" ? (
+        <Panel className="account-administration-panel">
+          <PanelHeading eyebrow="Owner controls" title="Access administration" action={<StateBadge tone="ready">Owner</StateBadge>} />
+          <div className="account-administration-callout"><div><strong>Users & permissions</strong><p>Add or remove operators, assign access roles, disable accounts, and send secure password resets.</p></div><button className="account-secondary-button" type="button" onClick={onOpenUsers}>Manage users</button></div>
+        </Panel>
+      ) : null}
     </div>
   );
 }
 
-function AccountControl({ displayName, email, initials, busyAction, onOpenSettings, onPasswordReset, onSignOut }: { displayName: string; email: string | null; initials: string; busyAction: AccountAction | null; onOpenSettings: () => void; onPasswordReset: () => void; onSignOut: () => void }) {
+function AccountControl({ displayName, email, initials, role, busyAction, onOpenSettings, onOpenUsers, onPasswordReset, onSignOut }: { displayName: string; email: string | null; initials: string; role: OperatorSession["role"]; busyAction: AccountAction | null; onOpenSettings: () => void; onOpenUsers: () => void; onPasswordReset: () => void; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -627,9 +817,10 @@ function AccountControl({ displayName, email, initials, busyAction, onOpenSettin
       {open && (
         <div id="operator-account-panel" className="account-popover" role="region" aria-label="Operator account controls">
           <div className="account-popover__identity"><span className="section-kicker">Operator control</span><strong>{displayName}</strong><small>{email ?? "Authenticated identity"}</small></div>
-          <div className="account-popover__status"><StatusDot tone="green" /><span>Secure session active</span></div>
+          <div className="account-popover__status"><StatusDot tone="green" /><span>{formatSystemState(role)} session active</span></div>
           <div className="account-popover__actions" aria-label="Account actions">
             <button type="button" onClick={() => select(onOpenSettings)}><span className="account-action__code">ST</span><span className="account-action__copy"><strong>Account settings</strong><small>Identity and access</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
+            {role === "owner" ? <button type="button" onClick={() => select(onOpenUsers)}><span className="account-action__code">US</span><span className="account-action__copy"><strong>Users & permissions</strong><small>Owner administration</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button> : null}
             <button type="button" onClick={() => select(onPasswordReset)} disabled={busyAction !== null}><span className="account-action__code">PW</span><span className="account-action__copy"><strong>Change password</strong><small>Email a secure link</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
             <button className="account-popover__logout" type="button" onClick={() => select(onSignOut)} disabled={busyAction !== null}><span className="account-action__code">EX</span><span className="account-action__copy"><strong>Log out</strong><small>Terminate this session</small></span><span className="account-action__arrow" aria-hidden="true">→</span></button>
           </div>
@@ -639,16 +830,25 @@ function AccountControl({ displayName, email, initials, busyAction, onOpenSettin
   );
 }
 
-function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user: User }) {
+function Dashboard({ onExit, operator, user }: { onExit: () => void | Promise<void>; operator: OperatorSession; user: User }) {
   const [activeView, setActiveView] = useState<View>("overview");
   const [now, setNow] = useState(() => new Date(0));
   const [toast, setToast] = useState("");
+  const toastTimerRef = useRef<number | null>(null);
   const [demoState, setDemoState] = useState<DemoState>(initialDemoState);
   const [accountAction, setAccountAction] = useState<AccountAction | null>(null);
   const [homeAssistantConnection, setHomeAssistantConnection] = useState<HomeAssistantConnection>("checking");
   const [climate, setClimate] = useState<ClimateSnapshot | null>(null);
-  const [climateBusy, setClimateBusy] = useState(false);
-  const { displayName, initials } = useMemo(() => getOperatorIdentity(user), [user]);
+  const [climateBusyAction, setClimateBusyAction] = useState<ClimateBusyAction>(null);
+  const { displayName, initials } = useMemo(() => {
+    const identity = getOperatorIdentity(user);
+    if (!operator.displayName) return identity;
+    const nameParts = operator.displayName.split(/\s+/).filter(Boolean);
+    const operatorInitials = nameParts.length > 1
+      ? `${nameParts[0][0]}${nameParts[nameParts.length - 1][0]}`
+      : operator.displayName.slice(0, 2);
+    return { displayName: operator.displayName, initials: operatorInitials.toUpperCase() };
+  }, [operator.displayName, user]);
 
   useEffect(() => {
     let loadTimer: number | undefined;
@@ -677,15 +877,27 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
   }, [user]);
 
   useEffect(() => {
+    if (climateBusyAction !== null) return;
     const initial = window.setTimeout(() => void refreshClimate(), 0);
     const timer = window.setInterval(() => void refreshClimate(), 15_000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [refreshClimate]);
+  }, [climateBusyAction, refreshClimate]);
 
-  function notify(message: string) { setToast(message); window.setTimeout(() => setToast(""), 3200); }
+  useEffect(() => () => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+  }, []);
+
+  const notify = useCallback((message: string) => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    setToast(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast("");
+      toastTimerRef.current = null;
+    }, 4200);
+  }, []);
   function applyState(next: DemoState, message: string) { setDemoState(next); notify(`${message} — no physical device was changed.`); }
   function selectScene(scene: DemoState["scene"]) {
     const configurations: Record<DemoState["scene"], Pick<DemoState, "lights" | "securityMode">> = {
@@ -697,33 +909,49 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
     applyState({ ...demoState, scene, ...configurations[scene] }, `${scene} scene preview updated`);
   }
   function toggleLight(id: LightId) { const lights = { ...demoState.lights, [id]: !demoState.lights[id] }; applyState({ ...demoState, lights }, `${lightLabels[id]} ${lights[id] ? "turned on" : "turned off"}`); }
-  async function setTemperature(value: number) {
-    if (!climate?.available || climate.targetTemperature === null || climateBusy) {
+  async function runClimateCommand(command: ClimateCommand) {
+    if (!climate?.available || climateBusyAction !== null || operator.role === "viewer") {
       notify("Live climate control is unavailable. No command was sent.");
       return;
     }
 
-    const lowerBound = Math.max(60, climate.minTemperature);
-    const upperBound = Math.min(80, climate.maxTemperature);
-    const bounded = Math.min(upperBound, Math.max(lowerBound, Math.round(value)));
-    const previous = climate;
-    setClimateBusy(true);
-    setClimate({ ...climate, targetTemperature: bounded });
-
+    setClimateBusyAction(command.action);
     try {
-      const snapshot = await climateRequest(user, {
-        method: "PATCH",
-        body: JSON.stringify({ temperature: bounded }),
-      });
-      setClimate(snapshot);
+      const result = await climateCommandRequest(user, command);
+      setClimate(result);
       setHomeAssistantConnection("connected");
-      notify(`Climate target set to ${bounded}° through Home Assistant.`);
+      if (result.command.status === "accepted") {
+        notify(command.action === "clear_hold"
+          ? "Resume request sent to Home Assistant. Live state will confirm the ecobee response."
+          : "Comfort-mode request sent to Home Assistant. Live state will confirm the ecobee response.");
+      } else if (command.action === "set_fan_mode") {
+        notify(command.fanMode === "on"
+          ? "Fan set to On. This indefinite hold remains until Resume schedule is used."
+          : `Fan mode set to ${formatSystemState(command.fanMode)}.`);
+      } else {
+        switch (command.action) {
+          case "set_temperature":
+            notify("Thermostat target confirmed through Home Assistant.");
+            break;
+          case "set_hvac_mode":
+            notify("HVAC mode confirmed through Home Assistant.");
+            break;
+          case "set_preset_mode":
+            notify("Thermostat preset confirmed through Home Assistant.");
+            break;
+          case "set_schedule_mode":
+            notify("Comfort mode confirmed through Home Assistant.");
+            break;
+          case "clear_hold":
+            notify("The ecobee schedule has resumed.");
+            break;
+        }
+      }
     } catch {
-      setClimate(previous);
-      notify("The thermostat did not confirm the change. The previous target was restored on screen.");
+      notify("The thermostat did not accept or confirm that command. Live state is being refreshed.");
       void refreshClimate();
     } finally {
-      setClimateBusy(false);
+      setClimateBusyAction(null);
     }
   }
   function toggleSecurity() { const securityMode = demoState.securityMode === "Armed" ? "Standby" : "Armed"; applyState({ ...demoState, securityMode }, `Security preview set to ${securityMode}`); }
@@ -762,16 +990,17 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
   switch (activeView) {
     case "mission": content = <MissionControlView />; break;
     case "security": content = <SecurityView state={demoState} onArm={toggleSecurity} />; break;
-    case "climate": content = <ClimateView climate={climate} connection={homeAssistantConnection} busy={climateBusy} onTemperature={(value) => void setTemperature(value)} />; break;
+    case "climate": content = <ClimateView climate={climate} connection={homeAssistantConnection} busyAction={climateBusyAction} readOnly={operator.role === "viewer"} onCommand={(command) => void runClimateCommand(command)} />; break;
     case "lighting": content = <LightingView state={demoState} onToggle={toggleLight} onScene={selectScene} />; break;
     case "network": content = <NetworkView />; break;
     case "cameras": content = <CamerasView />; break;
     case "utilities": content = <UtilitiesView />; break;
     case "connections": content = <ConnectionsView connection={homeAssistantConnection} climate={climate} />; break;
-    case "settings": content = <AccountSettingsView email={user.email} busyAction={accountAction} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} />; break;
+    case "users": content = operator.role === "owner" ? <UserManagementView user={user} currentOperator={operator} bootstrapOwnerEmail="kkratoville@gmail.com" onNotice={notify} /> : <Overview state={demoState} climate={climate} connection={homeAssistantConnection} onScene={selectScene} onNavigate={setActiveView} />; break;
+    case "settings": content = <AccountSettingsView email={user.email} role={operator.role} busyAction={accountAction} onOpenUsers={() => setActiveView("users")} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} />; break;
     default: content = <Overview state={demoState} climate={climate} connection={homeAssistantConnection} onScene={selectScene} onNavigate={setActiveView} />;
   }
-  const activeLabel = activeView === "settings" ? "Account settings" : navItems.find((item) => item.id === activeView)?.label ?? "Overview";
+  const activeLabel = activeView === "settings" ? "Account settings" : activeView === "users" ? "Users & permissions" : navItems.find((item) => item.id === activeView)?.label ?? "Overview";
 
   return (
     <main className="dashboard-shell">
@@ -779,10 +1008,10 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
         <div className="sidebar-brand"><BrandMark compact /></div>
         <nav className="desktop-nav" aria-label="Dashboard sections"><span className="nav-heading">Command domains</span>{navItems.map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span>{item.label}{activeView === item.id && <i />}</button>)}</nav>
         <div className="sidebar-status"><span className="nav-heading">System status</span><div><StatusDot tone="green" /><p><strong>Portal ready</strong><small>Authenticated control UI</small></p></div><div><StatusDot tone={homeAssistantConnection === "connected" ? "green" : "amber"} /><p><strong>{homeAssistantConnection === "connected" ? "HA connected" : homeAssistantConnection === "checking" ? "HA connecting" : "HA unavailable"}</strong><small>{homeAssistantConnection === "connected" && climate?.available ? "ecobee climate live" : "Climate controls disabled"}</small></p></div></div>
-        <button className="profile-card" type="button" onClick={() => setActiveView("settings")} aria-label={`Open account settings for ${user.email ?? displayName}`} title={user.email ?? "Signed-in account"}><span className="avatar">{initials}</span><span><strong>{displayName}</strong><small>Account settings</small></span><i>›</i></button>
+        <button className="profile-card" type="button" onClick={() => setActiveView("settings")} aria-label={`Open account settings for ${user.email ?? displayName}`} title={user.email ?? "Signed-in account"}><span className="avatar">{initials}</span><span><strong>{displayName}</strong><small>{formatSystemState(operator.role)} access</small></span><i>›</i></button>
       </aside>
       <section className="dashboard-main">
-        <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, {displayName}.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><AccountControl displayName={displayName} email={user.email} initials={initials} busyAction={accountAction} onOpenSettings={() => setActiveView("settings")} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} /></div></header>
+        <header className="dashboard-header"><div><span className="breadcrumb">Dover residence / {activeLabel}</span><h1>{greeting}, {displayName}.</h1></div><div className="header-right"><div className="time-block"><strong>{formattedTime}</strong><span>{formattedDate}</span></div><AccountControl displayName={displayName} email={user.email} initials={initials} role={operator.role} busyAction={accountAction} onOpenSettings={() => setActiveView("settings")} onOpenUsers={() => setActiveView("users")} onPasswordReset={() => void requestPasswordReset()} onSignOut={() => void terminateSession()} /></div></header>
         {content}
       </section>
       <nav className="mobile-nav" aria-label="Mobile dashboard sections">{navItems.slice(0, 5).map((item) => <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}><span>{item.code}</span><small>{item.label}</small></button>)}</nav>
@@ -794,6 +1023,8 @@ function Dashboard({ onExit, user }: { onExit: () => void | Promise<void>; user:
 export default function Home() {
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [operator, setOperator] = useState<OperatorSession | null>(null);
+  const [authorizationChecking, setAuthorizationChecking] = useState(false);
   const [authInitializationMessage, setAuthInitializationMessage] = useState("");
 
   useEffect(() => {
@@ -822,8 +1053,38 @@ export default function Home() {
     };
   }, []);
 
-  if (!authReady) return <AuthLoadingScreen />;
-  if (!user) return <LoginScreen initialMessage={authInitializationMessage} />;
+  useEffect(() => {
+    let cancelled = false;
+    if (!user) {
+      setOperator(null);
+      setAuthorizationChecking(false);
+      return;
+    }
 
-  return <Dashboard user={user} onExit={() => signOut(getFirebaseAuth())} />;
+    setAuthorizationChecking(true);
+    operatorSessionRequest(user)
+      .then((session) => {
+        if (cancelled) return;
+        setOperator(session);
+        setAuthorizationChecking(false);
+      })
+      .catch(async (error) => {
+        if (cancelled) return;
+        const status = error instanceof SessionAuthorizationError ? error.status : 503;
+        setAuthInitializationMessage(status === 403
+          ? "This identity is not authorized for Dover Controls. Contact the owner for access."
+          : "Authorization could not be verified. Please sign in again.");
+        setOperator(null);
+        setAuthorizationChecking(false);
+        try { await signOut(getFirebaseAuth()); } catch { /* local state still fails closed */ }
+      });
+
+    return () => { cancelled = true; };
+  }, [user]);
+
+  if (!authReady || (user && authorizationChecking)) return <AuthLoadingScreen />;
+  if (!user) return <LoginScreen initialMessage={authInitializationMessage} />;
+  if (!operator) return <AuthLoadingScreen />;
+
+  return <Dashboard user={user} operator={operator} onExit={() => signOut(getFirebaseAuth())} />;
 }
