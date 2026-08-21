@@ -7,8 +7,10 @@ import { isAssignableOperatorRole } from "@/lib/operator-types";
 import {
   FirebaseAdminRestError,
   createFirebaseUser,
+  findFirebaseUserByEmail,
   listFirebaseUsers,
   toOperatorUser,
+  updateFirebaseUser,
 } from "@/lib/server/firebase-admin-rest";
 import {
   getBootstrapOwnerEmail,
@@ -164,6 +166,22 @@ export async function POST(request: Request): Promise<Response> {
       temporaryPassword: payload.temporaryPassword,
       ...(payload.displayName !== undefined ? { displayName: payload.displayName.trim() } : {}),
     };
+
+    const existing = await findFirebaseUserByEmail(input.email, request);
+    if (existing) {
+      if (effectiveRole(existing)) {
+        return json({ error: "operator_email_exists" }, 409);
+      }
+
+      const adopted = await updateFirebaseUser(existing.uid, {
+        ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+        disabled: false,
+        password: input.temporaryPassword,
+        role: input.role,
+      }, request);
+      return json({ user: toOperatorUser(adopted, input.role) });
+    }
+
     const user = await createFirebaseUser({
       email: input.email,
       displayName: input.displayName,
