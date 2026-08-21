@@ -45,6 +45,10 @@ function errorResponse(error: unknown): Response {
     return json({ error: error.code }, error.status);
   }
   if (error instanceof HomeAssistantBridgeError) {
+    console.error("[home-assistant-climate] bridge request failed", {
+      code: error.code,
+      status: error.status,
+    });
     return json({ error: error.code }, error.status);
   }
 
